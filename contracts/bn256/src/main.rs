@@ -14,7 +14,7 @@ use fluentbase_sdk::{
     PRECOMPILE_BN256_MUL,
     PRECOMPILE_BN256_PAIR,
 };
-use revm_precompile::bn128::{
+use precompile::bn128::{
     add::ISTANBUL_ADD_GAS_COST,
     mul::ISTANBUL_MUL_GAS_COST,
     pair::{ISTANBUL_PAIR_BASE, ISTANBUL_PAIR_PER_POINT},
@@ -31,12 +31,12 @@ pub fn main_entry(mut sdk: impl SharedAPI) {
     // call precompiled function
     let result = match bytecode_address {
         PRECOMPILE_BN256_ADD => {
-            revm_precompile::bn128::run_add(&input, ISTANBUL_ADD_GAS_COST, gas_limit)
+            precompile::bn128::run_add(&input, ISTANBUL_ADD_GAS_COST, gas_limit)
         }
         PRECOMPILE_BN256_MUL => {
-            revm_precompile::bn128::run_mul(&input, ISTANBUL_MUL_GAS_COST, gas_limit)
+            precompile::bn128::run_mul(&input, ISTANBUL_MUL_GAS_COST, gas_limit)
         }
-        PRECOMPILE_BN256_PAIR => revm_precompile::bn128::run_pair(
+        PRECOMPILE_BN256_PAIR => precompile::bn128::run_pair(
             &input,
             ISTANBUL_PAIR_PER_POINT,
             ISTANBUL_PAIR_BASE,
@@ -44,7 +44,7 @@ pub fn main_entry(mut sdk: impl SharedAPI) {
         ),
         _ => unreachable!("bn128: unsupported contract address"),
     };
-    let result = result.unwrap_or_else(|err| sdk.exit(ExitCode::from(err)));
+    let result = result.unwrap_or_else(|_| sdk.native_exit(ExitCode::PrecompileError));
     sdk.sync_evm_gas(result.gas_used, 0);
     // write output
     sdk.write(result.bytes.as_ref());

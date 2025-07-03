@@ -4,7 +4,7 @@ extern crate core;
 extern crate fluentbase_sdk;
 
 use fluentbase_sdk::{alloc_slice, entrypoint, ContextReader, ExitCode, SharedAPI};
-use revm_precompile::{
+use precompile::{
     calc_linear_cost_u32,
     identity::{IDENTITY_BASE, IDENTITY_PER_WORD},
 };
@@ -15,7 +15,7 @@ pub fn main_entry(mut sdk: impl SharedAPI) {
     // fail fast if we don't have enough fuel for the call
     let gas_used = calc_linear_cost_u32(input_length as usize, IDENTITY_BASE, IDENTITY_PER_WORD);
     if gas_used > gas_limit {
-        sdk.exit(ExitCode::OutOfFuel);
+        sdk.native_exit(ExitCode::OutOfFuel);
     }
     sdk.sync_evm_gas(gas_used, 0);
     let mut input = alloc_slice(input_length as usize);

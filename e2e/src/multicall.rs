@@ -1,8 +1,8 @@
-use fluentbase_sdk_testing::EvmTestingContext;
 use alloc::vec::Vec;
 use core::str::from_utf8;
 use fluentbase_codec::SolidityABI;
 use fluentbase_sdk::{address, compile_wasm_to_rwasm, Address, Bytes};
+use fluentbase_sdk_testing::EvmTestingContext;
 use hex_literal::hex;
 
 #[test]
@@ -10,7 +10,10 @@ fn test_multicall_greeting() {
     let mut ctx = EvmTestingContext::default();
     const EXAMPLE_GREETING_ADDRESS: Address = address!("2222222222222222222222222222222222222222");
     let greeting_rwasm = compile_wasm_to_rwasm(crate::EXAMPLE_GREETING).unwrap();
-    ctx.add_bytecode(EXAMPLE_GREETING_ADDRESS, greeting_rwasm.rwasm_bytecode);
+    ctx.add_bytecode(
+        EXAMPLE_GREETING_ADDRESS,
+        greeting_rwasm.rwasm_module.serialize().into(),
+    );
     const DEPLOYER_ADDRESS: Address = address!("1231238908230948230948209348203984029834");
     let multicall_input: Bytes = hex!("ac9650d800000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000000445773e4e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000445773e4e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000445773e4e00000000000000000000000000000000000000000000000000000000").into();
     let result = ctx.call_evm_tx(
@@ -20,6 +23,7 @@ fn test_multicall_greeting() {
         Some(300_000_000),
         None,
     );
+    assert!(result.is_success(), "failed to call evm ({:?})", result);
     let output = result.output().unwrap_or_default();
     println!("Decoded output: {:?}", from_utf8(&output[68..]));
     assert!(result.is_success());
