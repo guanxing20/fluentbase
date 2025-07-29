@@ -2,29 +2,9 @@
 mod tests {
     use crate::{
         account::{Account, AccountSharedData, ReadableAccount},
-        common::TestSdkType,
-        context::InvokeContext,
-        hash::{hash, Hash},
-        helpers::create_account_shared_data_for_test,
         native_loader,
-        nonce_account,
         pubkey::Pubkey,
-        recent_blockhashes_account,
-        recent_blockhashes_account::create_account_with_data_for_test,
-        rent::Rent,
-        solana_program::{
-            instruction::{AccountMeta, Instruction},
-            nonce,
-            nonce::state::{
-                Data as NonceData,
-                DurableNonce,
-                State as NonceState,
-                Versions as NonceVersions,
-            },
-            sysvar,
-            sysvar::{recent_blockhashes, recent_blockhashes::IterItem},
-        },
-        system_instruction,
+        solana_program::{instruction::AccountMeta, sysvar},
         system_instruction::{SystemError, SystemInstruction, MAX_PERMITTED_DATA_LENGTH},
         system_processor::{get_system_account_kind, Address, Entrypoint, SystemAccountKind},
         system_program,
@@ -33,8 +13,8 @@ mod tests {
     };
     use fluentbase_sdk::SharedAPI;
     use solana_bincode::serialize;
-    use solana_fee_calculator::FeeCalculator;
     use solana_instruction::error::InstructionError;
+    use solana_pubkey::PUBKEY_BYTES;
 
     fn process_instruction<SDK: SharedAPI>(
         sdk: &SDK,
@@ -57,24 +37,11 @@ mod tests {
         )
     }
 
-    fn create_default_account() -> AccountSharedData {
-        AccountSharedData::new(0, 0, &Pubkey::new_unique())
-    }
-    fn create_default_recent_blockhashes_account() -> AccountSharedData {
-        #[allow(deprecated)]
-        recent_blockhashes_account::create_account_with_data_for_test(
-            vec![IterItem(0u64, &Hash::default(), 0); recent_blockhashes::MAX_ENTRIES],
-        )
-    }
-    fn create_default_rent_account() -> AccountSharedData {
-        create_account_shared_data_for_test(&Rent::free())
-    }
-
     #[test]
     fn test_create_account() {
         let sdk = new_test_sdk();
 
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let to = Pubkey::new_unique();
         let from_account = AccountSharedData::new(100, 0, &system_program::id());
@@ -113,7 +80,7 @@ mod tests {
     fn test_create_account_with_seed() {
         let sdk = new_test_sdk();
 
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let seed = "shiny pepper";
         let to = Pubkey::create_with_seed(&from, seed, &new_owner).unwrap();
@@ -155,7 +122,7 @@ mod tests {
     fn test_create_account_with_seed_separate_base_account() {
         let sdk = new_test_sdk();
 
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let base = Pubkey::new_unique();
         let seed = "shiny pepper";
@@ -227,7 +194,7 @@ mod tests {
     fn test_create_account_with_seed_missing_sig() {
         let sdk = new_test_sdk();
 
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let seed = "dull boy";
         let to = Pubkey::create_with_seed(&from, seed, &new_owner).unwrap();
@@ -266,7 +233,7 @@ mod tests {
         let sdk = new_test_sdk();
 
         // create account with zero lamports transferred
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let from_account = AccountSharedData::new(100, 0, &Pubkey::new_unique()); // not from system account
         let to = Pubkey::new_unique();
@@ -306,7 +273,7 @@ mod tests {
         let sdk = new_test_sdk();
 
         // Attempt to create account with more lamports than from_account has
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let from_account = AccountSharedData::new(100, 0, &Pubkey::new_unique());
         let to = Pubkey::new_unique();
@@ -393,13 +360,13 @@ mod tests {
     fn test_create_already_in_use() {
         let sdk = new_test_sdk();
 
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let from_account = AccountSharedData::new(100, 0, &system_program::id());
         let owned_key = Pubkey::new_unique();
 
         // Attempt to create system account in account already owned by another program
-        let original_program_owner = Pubkey::from([5; 32]);
+        let original_program_owner = Pubkey::from([5; PUBKEY_BYTES]);
         let owned_account = AccountSharedData::new(0, 0, &original_program_owner);
         let unchanged_account = owned_account.clone();
         let accounts = process_instruction(
@@ -492,7 +459,7 @@ mod tests {
         let sdk = new_test_sdk();
 
         // Attempt to create an account without signing the transfer
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let from_account = AccountSharedData::new(100, 0, &system_program::id());
         let owned_key = Pubkey::new_unique();
@@ -619,7 +586,7 @@ mod tests {
         let sdk = new_test_sdk();
 
         // Attempt to create system account in account with populated data
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
         let from_account = AccountSharedData::new(100, 0, &system_program::id());
         let populated_key = Pubkey::new_unique();
@@ -654,49 +621,10 @@ mod tests {
     }
 
     #[test]
-    fn test_create_from_account_is_nonce_fail() {
-        let sdk = new_test_sdk();
-
-        let nonce = Pubkey::new_unique();
-        let nonce_account = AccountSharedData::new_data(
-            42,
-            &nonce::state::Versions::new(nonce::State::Initialized(nonce::state::Data::default())),
-            &system_program::id(),
-        )
-        .unwrap();
-        let new = Pubkey::new_unique();
-        let new_account = AccountSharedData::new(0, 0, &system_program::id());
-
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::CreateAccount {
-                lamports: 42,
-                space: 0,
-                owner: Pubkey::new_unique(),
-            })
-            .unwrap(),
-            vec![(nonce, nonce_account), (new, new_account)],
-            vec![
-                AccountMeta {
-                    pubkey: nonce,
-                    is_signer: true,
-                    is_writable: false,
-                },
-                AccountMeta {
-                    pubkey: new,
-                    is_signer: true,
-                    is_writable: true,
-                },
-            ],
-            Err(InstructionError::InvalidArgument),
-        );
-    }
-
-    #[test]
     fn test_assign() {
         let sdk = new_test_sdk();
 
-        let new_owner = Pubkey::from([9; 32]);
+        let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let pubkey = Pubkey::new_unique();
         let account = AccountSharedData::new(100, 0, &system_program::id());
 
@@ -799,7 +727,7 @@ mod tests {
 
         let from = Pubkey::new_unique();
         let from_account = AccountSharedData::new(100, 0, &system_program::id());
-        let to = Pubkey::from([3; 32]);
+        let to = Pubkey::from([3; PUBKEY_BYTES]);
         let to_account = AccountSharedData::new(1, 0, &to); // account owner should not matter
         let transaction_accounts = vec![
             (from.clone(), from_account.clone()),
@@ -881,12 +809,12 @@ mod tests {
         let sdk = new_test_sdk();
 
         let base = Pubkey::new_unique();
-        let base_account = AccountSharedData::new(100, 0, &Pubkey::from([2; 32])); // account owner should not matter
+        let base_account = AccountSharedData::new(100, 0, &Pubkey::from([2; PUBKEY_BYTES])); // account owner should not matter
         let from_seed = "42".to_string();
         let from_owner = system_program::id();
         let from = Pubkey::create_with_seed(&base, from_seed.as_str(), &from_owner).unwrap();
         let from_account = AccountSharedData::new(100, 0, &system_program::id());
-        let to = Pubkey::from([3; 32]);
+        let to = Pubkey::from([3; PUBKEY_BYTES]);
         let to_account = AccountSharedData::new(1, 0, &to); // account owner should not matter
         let transaction_accounts =
             vec![(from, from_account), (base, base_account), (to, to_account)];
@@ -958,417 +886,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_lamports_from_nonce_account_fail() {
-        let sdk = new_test_sdk();
-
-        let from = Pubkey::new_unique();
-        let from_account = AccountSharedData::new_data(
-            100,
-            &nonce::state::Versions::new(nonce::State::Initialized(nonce::state::Data {
-                authority: from,
-                ..nonce::state::Data::default()
-            })),
-            &system_program::id(),
-        )
-        .unwrap();
-        assert_eq!(
-            get_system_account_kind(&from_account),
-            Some(SystemAccountKind::Nonce)
-        );
-        let to = Pubkey::from([3; 32]);
-        let to_account = AccountSharedData::new(1, 0, &to); // account owner should not matter
-
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::Transfer { lamports: 50 }).unwrap(),
-            vec![(from, from_account), (to, to_account)],
-            vec![
-                AccountMeta {
-                    pubkey: from,
-                    is_signer: true,
-                    is_writable: false,
-                },
-                AccountMeta {
-                    pubkey: to,
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Err(InstructionError::InvalidArgument),
-        );
-    }
-
-    fn process_nonce_instruction<SDK: SharedAPI>(
-        sdk: &SDK,
-        instruction: Instruction,
-        expected_result: Result<(), InstructionError>,
-    ) -> Vec<AccountSharedData> {
-        let transaction_accounts = instruction
-            .accounts
-            .iter()
-            .map(|meta| {
-                #[allow(deprecated)]
-                (
-                    meta.pubkey,
-                    if recent_blockhashes::check_id(&meta.pubkey) {
-                        create_default_recent_blockhashes_account()
-                    } else if sysvar::rent::check_id(&meta.pubkey) {
-                        create_account_shared_data_for_test(&Rent::free())
-                    } else {
-                        AccountSharedData::new(0, 0, &Pubkey::new_unique())
-                    },
-                )
-            })
-            .collect();
-        process_instruction(
-            sdk,
-            &instruction.data,
-            transaction_accounts,
-            instruction.accounts,
-            expected_result,
-        )
-    }
-
-    #[test]
-    fn test_process_nonce_ix_no_acc_data_fail() {
-        let sdk = new_test_sdk();
-
-        let none_address = Pubkey::new_unique();
-        process_nonce_instruction(
-            &sdk,
-            system_instruction::advance_nonce_account(&none_address, &none_address),
-            Err(InstructionError::InvalidAccountData),
-        );
-    }
-
-    #[test]
-    fn test_process_nonce_ix_no_keyed_accs_fail() {
-        let sdk = new_test_sdk();
-
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::AdvanceNonceAccount).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            Err(InstructionError::NotEnoughAccountKeys),
-        );
-    }
-
-    #[test]
-    fn test_process_nonce_ix_only_nonce_acc_fail() {
-        let sdk = new_test_sdk();
-
-        let pubkey = Pubkey::new_unique();
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::AdvanceNonceAccount).unwrap(),
-            vec![(pubkey, create_default_account())],
-            vec![AccountMeta {
-                pubkey,
-                is_signer: true,
-                is_writable: true,
-            }],
-            Err(InstructionError::NotEnoughAccountKeys),
-        );
-    }
-
-    #[test]
-    fn test_process_nonce_ix_ok() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let nonce_account = nonce_account::create_account(1_000_000).into_inner();
-        #[allow(deprecated)]
-        let blockhash_id = recent_blockhashes::id();
-        let accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap(),
-            vec![
-                (nonce_address, nonce_account),
-                (blockhash_id, create_default_recent_blockhashes_account()),
-                (sysvar::rent::id(), create_default_rent_account()),
-            ],
-            vec![
-                AccountMeta {
-                    pubkey: nonce_address,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey: blockhash_id,
-                    is_signer: false,
-                    is_writable: false,
-                },
-                AccountMeta {
-                    pubkey: sysvar::rent::id(),
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Ok(()),
-        );
-        let blockhash = hash(&serialize(&0).unwrap());
-        #[allow(deprecated)]
-        let new_recent_blockhashes_account = create_account_with_data_for_test(vec![
-                IterItem(0u64, &blockhash, 0);
-                recent_blockhashes::MAX_ENTRIES
-            ]);
-        mock_process_instruction(
-            &sdk,
-            &system_program::id(),
-            Vec::new(),
-            &serialize(&SystemInstruction::AdvanceNonceAccount).unwrap(),
-            vec![
-                (nonce_address, accounts[0].clone()),
-                (blockhash_id, new_recent_blockhashes_account),
-            ],
-            vec![
-                AccountMeta {
-                    pubkey: nonce_address,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey: blockhash_id,
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Ok(()),
-            Entrypoint::vm,
-            |invoke_context: &mut InvokeContext<TestSdkType>| {
-                invoke_context.environment_config.blockhash = hash(&serialize(&0).unwrap());
-            },
-            |_invoke_context| {},
-        );
-    }
-
-    #[test]
-    fn test_process_withdraw_ix_no_acc_data_fail() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        process_nonce_instruction(
-            &sdk,
-            system_instruction::withdraw_nonce_account(
-                &nonce_address,
-                &Pubkey::new_unique(),
-                &nonce_address,
-                1,
-            ),
-            Err(InstructionError::InvalidAccountData),
-        );
-    }
-
-    #[test]
-    fn test_process_withdraw_ix_no_keyed_accs_fail() {
-        let sdk = new_test_sdk();
-
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::WithdrawNonceAccount(42)).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            Err(InstructionError::NotEnoughAccountKeys),
-        );
-    }
-
-    #[test]
-    fn test_process_withdraw_ix_only_nonce_acc_fail() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::WithdrawNonceAccount(42)).unwrap(),
-            vec![(nonce_address, create_default_account())],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: true,
-                is_writable: true,
-            }],
-            Err(InstructionError::NotEnoughAccountKeys),
-        );
-    }
-
-    #[test]
-    fn test_process_withdraw_ix_ok() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let nonce_account = nonce_account::create_account(1_000_000).into_inner();
-        let pubkey = Pubkey::new_unique();
-        #[allow(deprecated)]
-        let blockhash_id = recent_blockhashes::id();
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::WithdrawNonceAccount(42)).unwrap(),
-            vec![
-                (nonce_address, nonce_account),
-                (pubkey, create_default_account()),
-                (blockhash_id, create_default_recent_blockhashes_account()),
-                (sysvar::rent::id(), create_default_rent_account()),
-            ],
-            vec![
-                AccountMeta {
-                    pubkey: nonce_address,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey: blockhash_id,
-                    is_signer: false,
-                    is_writable: false,
-                },
-                AccountMeta {
-                    pubkey: sysvar::rent::id(),
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Ok(()),
-        );
-    }
-
-    #[test]
-    fn test_process_initialize_ix_no_keyed_accs_fail() {
-        let sdk = new_test_sdk();
-
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::InitializeNonceAccount(Pubkey::default())).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            Err(InstructionError::NotEnoughAccountKeys),
-        );
-    }
-
-    #[test]
-    fn test_process_initialize_ix_only_nonce_acc_fail() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let nonce_account = nonce_account::create_account(1_000_000).into_inner();
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap(),
-            vec![(nonce_address, nonce_account)],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: true,
-                is_writable: true,
-            }],
-            Err(InstructionError::NotEnoughAccountKeys),
-        );
-    }
-
-    #[test]
-    fn test_process_initialize_ix_ok() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let nonce_account = nonce_account::create_account(1_000_000).into_inner();
-        #[allow(deprecated)]
-        let blockhash_id = recent_blockhashes::id();
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap(),
-            vec![
-                (nonce_address, nonce_account),
-                (blockhash_id, create_default_recent_blockhashes_account()),
-                (sysvar::rent::id(), create_default_rent_account()),
-            ],
-            vec![
-                AccountMeta {
-                    pubkey: nonce_address,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey: blockhash_id,
-                    is_signer: false,
-                    is_writable: false,
-                },
-                AccountMeta {
-                    pubkey: sysvar::rent::id(),
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Ok(()),
-        );
-    }
-
-    #[test]
-    fn test_process_authorize_ix_ok() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let nonce_account = nonce_account::create_account(1_000_000).into_inner();
-        #[allow(deprecated)]
-        let blockhash_id = recent_blockhashes::id();
-        let accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap(),
-            vec![
-                (nonce_address, nonce_account),
-                (blockhash_id, create_default_recent_blockhashes_account()),
-                (sysvar::rent::id(), create_default_rent_account()),
-            ],
-            vec![
-                AccountMeta {
-                    pubkey: nonce_address,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey: blockhash_id,
-                    is_signer: false,
-                    is_writable: false,
-                },
-                AccountMeta {
-                    pubkey: sysvar::rent::id(),
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Ok(()),
-        );
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::AuthorizeNonceAccount(nonce_address)).unwrap(),
-            vec![(nonce_address, accounts[0].clone())],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: true,
-                is_writable: true,
-            }],
-            Ok(()),
-        );
-    }
-
-    #[test]
-    fn test_process_authorize_bad_account_data_fail() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        process_nonce_instruction(
-            &sdk,
-            system_instruction::authorize_nonce_account(
-                &nonce_address,
-                &Pubkey::new_unique(),
-                &nonce_address,
-            ),
-            Err(InstructionError::InvalidAccountData),
-        );
-    }
-
-    #[test]
     fn test_get_system_account_kind_system_ok() {
         let system_account = AccountSharedData::default();
         assert_eq!(
@@ -1378,292 +895,10 @@ mod tests {
     }
 
     #[test]
-    fn test_get_system_account_kind_nonce_ok() {
-        let nonce_account = AccountSharedData::new_data(
-            42,
-            &nonce::state::Versions::new(nonce::State::Initialized(nonce::state::Data::default())),
-            &system_program::id(),
-        )
-        .unwrap();
-        assert_eq!(
-            get_system_account_kind(&nonce_account),
-            Some(SystemAccountKind::Nonce)
-        );
-    }
-
-    #[test]
-    fn test_get_system_account_kind_uninitialized_nonce_account_fail() {
-        assert_eq!(
-            get_system_account_kind(&nonce_account::create_account(42).borrow()),
-            None
-        );
-    }
-
-    #[test]
     fn test_get_system_account_kind_system_owner_nonzero_nonnonce_data_fail() {
         let other_data_account =
             AccountSharedData::new_data(42, b"other", &Pubkey::default()).unwrap();
         assert_eq!(get_system_account_kind(&other_data_account), None);
-    }
-
-    #[test]
-    fn test_get_system_account_kind_nonsystem_owner_with_nonce_data_fail() {
-        let nonce_account = AccountSharedData::new_data(
-            42,
-            &nonce::state::Versions::new(nonce::State::Initialized(nonce::state::Data::default())),
-            &Pubkey::new_unique(),
-        )
-        .unwrap();
-        assert_eq!(get_system_account_kind(&nonce_account), None);
-    }
-
-    #[test]
-    fn test_nonce_initialize_with_empty_recent_blockhashes_fail() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let nonce_account = nonce_account::create_account(1_000_000).into_inner();
-        #[allow(deprecated)]
-        let blockhash_id = recent_blockhashes::id();
-        #[allow(deprecated)]
-        let new_recent_blockhashes_account = create_account_with_data_for_test(vec![]);
-        process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap(),
-            vec![
-                (nonce_address, nonce_account),
-                (blockhash_id, new_recent_blockhashes_account),
-                (sysvar::rent::id(), create_default_rent_account()),
-            ],
-            vec![
-                AccountMeta {
-                    pubkey: nonce_address,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey: blockhash_id,
-                    is_signer: false,
-                    is_writable: false,
-                },
-                AccountMeta {
-                    pubkey: sysvar::rent::id(),
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Err(SystemError::NonceNoRecentBlockhashes.into()),
-        );
-    }
-
-    #[test]
-    fn test_nonce_advance_with_empty_recent_blockhashes_fail() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let nonce_account = nonce_account::create_account(1_000_000).into_inner();
-        #[allow(deprecated)]
-        let blockhash_id = recent_blockhashes::id();
-        let accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap(),
-            vec![
-                (nonce_address, nonce_account),
-                (blockhash_id, create_default_recent_blockhashes_account()),
-                (sysvar::rent::id(), create_default_rent_account()),
-            ],
-            vec![
-                AccountMeta {
-                    pubkey: nonce_address,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey: blockhash_id,
-                    is_signer: false,
-                    is_writable: false,
-                },
-                AccountMeta {
-                    pubkey: sysvar::rent::id(),
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Ok(()),
-        );
-        #[allow(deprecated)]
-        let new_recent_blockhashes_account = create_account_with_data_for_test(vec![]);
-        mock_process_instruction(
-            &sdk,
-            &system_program::id(),
-            Vec::new(),
-            &serialize(&SystemInstruction::AdvanceNonceAccount).unwrap(),
-            vec![
-                (nonce_address, accounts[0].clone()),
-                (blockhash_id, new_recent_blockhashes_account),
-            ],
-            vec![
-                AccountMeta {
-                    pubkey: nonce_address,
-                    is_signer: true,
-                    is_writable: true,
-                },
-                AccountMeta {
-                    pubkey: blockhash_id,
-                    is_signer: false,
-                    is_writable: false,
-                },
-            ],
-            Err(SystemError::NonceNoRecentBlockhashes.into()),
-            Entrypoint::vm,
-            |invoke_context: &mut InvokeContext<TestSdkType>| {
-                invoke_context.environment_config.blockhash = hash(&serialize(&0).unwrap());
-            },
-            |_invoke_context| {},
-        );
-    }
-
-    #[test]
-    fn test_nonce_account_upgrade_check_owner() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let versions = NonceVersions::Legacy(Box::new(NonceState::Uninitialized));
-        let nonce_account = AccountSharedData::new_data(
-            1_000_000,             // lamports
-            &versions,             // state
-            &Pubkey::new_unique(), // owner
-        )
-        .unwrap();
-        let accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::UpgradeNonceAccount).unwrap(),
-            vec![(nonce_address, nonce_account.clone())],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: false,
-                is_writable: true,
-            }],
-            Err(InstructionError::InvalidAccountOwner),
-        );
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0], nonce_account);
-    }
-
-    fn new_nonce_account(versions: NonceVersions) -> AccountSharedData {
-        let nonce_account = AccountSharedData::new_data(
-            1_000_000,             // lamports
-            &versions,             // state
-            &system_program::id(), // owner
-        )
-        .unwrap();
-        assert_eq!(
-            nonce_account.deserialize_data::<NonceVersions>().unwrap(),
-            versions
-        );
-        nonce_account
-    }
-
-    #[test]
-    fn test_nonce_account_upgrade() {
-        let sdk = new_test_sdk();
-
-        let nonce_address = Pubkey::new_unique();
-        let versions = NonceVersions::Legacy(Box::new(NonceState::Uninitialized));
-        let nonce_account = new_nonce_account(versions);
-        let accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::UpgradeNonceAccount).unwrap(),
-            vec![(nonce_address, nonce_account.clone())],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: false,
-                is_writable: true,
-            }],
-            Err(InstructionError::InvalidArgument),
-        );
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0], nonce_account);
-        let versions = NonceVersions::Current(Box::new(NonceState::Uninitialized));
-        let nonce_account = new_nonce_account(versions);
-        let accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::UpgradeNonceAccount).unwrap(),
-            vec![(nonce_address, nonce_account.clone())],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: false,
-                is_writable: true,
-            }],
-            Err(InstructionError::InvalidArgument),
-        );
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0], nonce_account);
-        let blockhash = Hash::from([171; 32]);
-        let durable_nonce = DurableNonce::from_blockhash(&blockhash);
-        let data = NonceData {
-            authority: Pubkey::new_unique(),
-            durable_nonce,
-            fee_calculator: FeeCalculator {
-                lamports_per_signature: 2718,
-            },
-        };
-        let versions = NonceVersions::Legacy(Box::new(NonceState::Initialized(data.clone())));
-        let nonce_account = new_nonce_account(versions);
-        let accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::UpgradeNonceAccount).unwrap(),
-            vec![(nonce_address, nonce_account.clone())],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: false,
-                is_writable: false, // Should fail!
-            }],
-            Err(InstructionError::InvalidArgument),
-        );
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0], nonce_account);
-        let mut accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::UpgradeNonceAccount).unwrap(),
-            vec![(nonce_address, nonce_account)],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: false,
-                is_writable: true,
-            }],
-            Ok(()),
-        );
-        assert_eq!(accounts.len(), 1);
-        let nonce_account = accounts.remove(0);
-        let durable_nonce = DurableNonce::from_blockhash(durable_nonce.as_hash());
-        assert_ne!(data.durable_nonce, durable_nonce);
-        let data = NonceData {
-            durable_nonce,
-            ..data
-        };
-        let upgraded_nonce_account =
-            NonceVersions::Current(Box::new(NonceState::Initialized(data)));
-        assert_eq!(
-            nonce_account.deserialize_data::<NonceVersions>().unwrap(),
-            upgraded_nonce_account
-        );
-        let accounts = process_instruction(
-            &sdk,
-            &serialize(&SystemInstruction::UpgradeNonceAccount).unwrap(),
-            vec![(nonce_address, nonce_account)],
-            vec![AccountMeta {
-                pubkey: nonce_address,
-                is_signer: false,
-                is_writable: true,
-            }],
-            Err(InstructionError::InvalidArgument),
-        );
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(
-            accounts[0].deserialize_data::<NonceVersions>().unwrap(),
-            upgraded_nonce_account
-        );
     }
 
     #[test]

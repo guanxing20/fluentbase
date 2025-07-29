@@ -1,6 +1,5 @@
 use crate::{HostTestingContext, HostTestingContextNativeAPI};
 use core::{borrow::Borrow, mem::take, str::from_utf8};
-use fluentbase_genesis::GENESIS_CONTRACTS_BY_ADDRESS;
 use fluentbase_runtime::{Runtime, RuntimeContext};
 use fluentbase_sdk::{
     bytes::BytesMut,
@@ -11,6 +10,7 @@ use fluentbase_sdk::{
     Bytes,
     ContextReader,
     ExitCode,
+    GenesisContract,
     MetadataAPI,
     SharedAPI,
     SharedContextInputV1,
@@ -46,31 +46,38 @@ pub struct EvmTestingContext {
 
 impl Default for EvmTestingContext {
     fn default() -> Self {
-        Self::load_from_genesis()
+        Self::new()
     }
 }
 
 #[allow(dead_code)]
 impl EvmTestingContext {
-    fn load_from_genesis() -> Self {
-        // create jzkt and put it into a testing context
-        let mut db = InMemoryDB::default();
-        // convert all accounts from genesis into jzkt
-        for (k, v) in GENESIS_CONTRACTS_BY_ADDRESS.iter() {
+    pub fn new() -> Self {
+        Self {
+            sdk: HostTestingContext::default(),
+            db: InMemoryDB::default(),
+            cfg: CfgEnv::default(),
+            disabled_rwasm: false,
+        }
+    }
+
+    // Add smart contracts to the genesis
+    pub fn with_contracts(self, contracts: &[GenesisContract]) -> Self {
+        let mut db = self.db;
+        for contract in contracts.iter() {
             let info: AccountInfo = AccountInfo {
                 balance: U256::ZERO,
                 nonce: 0,
-                code_hash: v.rwasm_bytecode_hash,
-                code: Some(Bytecode::new_raw(v.rwasm_bytecode.clone())),
+                code_hash: contract.rwasm_bytecode_hash,
+                code: Some(Bytecode::new_raw(contract.rwasm_bytecode.clone())),
             };
-            db.insert_account_info(*k, info);
+            db.insert_account_info(contract.address, info);
         }
-        let cfg = CfgEnv::default();
         Self {
-            sdk: HostTestingContext::default(),
+            sdk: self.sdk,
             db,
-            cfg,
-            disabled_rwasm: false,
+            cfg: self.cfg,
+            disabled_rwasm: self.disabled_rwasm,
         }
     }
 
@@ -93,10 +100,6 @@ impl EvmTestingContext {
             if let Some(code) = db_account.info.code.as_mut() {
                 match code {
                     Bytecode::OwnableAccount(account) => {
-                        println!(
-                            "perekachak: address={address}, code={}",
-                            account.metadata.len()
-                        );
                         self.sdk
                             .metadata_write(address, 0, account.metadata.clone());
                     }
@@ -187,6 +190,7 @@ impl EvmTestingContext {
         if !result.is_success() {
             try_print_utf8_error(result.output().cloned().unwrap_or_default().as_ref())
         }
+        #[cfg(feature = "debug-print")]
         println!("deployment gas used: {}", result.gas_used());
         assert!(result.is_success());
         let contract_address = calc_create_address::<HostTestingContextNativeAPI>(&deployer, nonce);
@@ -229,10 +233,6 @@ impl EvmTestingContext {
 
     pub fn nonce(&mut self, caller: Address) -> u64 {
         let account = self.db.load_account(caller).unwrap();
-        println!(
-            "current nonce for {}: {} ({:?})",
-            caller, account.info.nonce, account.account_state
-        );
         account.info.nonce
     }
 }

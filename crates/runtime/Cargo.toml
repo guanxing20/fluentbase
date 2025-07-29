@@ -14,7 +14,7 @@ categories.workspace = true
 fluentbase-codec = { workspace = true }
 fluentbase-types = { workspace = true }
 
-rwasm = { workspace = true }
+rwasm = { workspace = true, features = ["cache-compiled-artifacts"] }
 
 # misc
 k256 = { version = "0.13.1", default-features = false, features = ["ecdsa"] }
@@ -30,6 +30,7 @@ tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 num = "0.4.3"
 sp1-curves = { version = "5.0.0" }
 sp1-primitives = { version = "5.0.0" }
+fs2 = "0.4.3"
 
 [dev-dependencies]
 sha2 = { version = "0.10.8" }

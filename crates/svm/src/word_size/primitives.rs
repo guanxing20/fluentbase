@@ -182,7 +182,7 @@ mod tests {
     use alloc::rc::Rc;
     use core::cell::RefCell;
     use solana_account_info::AccountInfo;
-    use solana_pubkey::Pubkey;
+    use solana_pubkey::{Pubkey, PUBKEY_BYTES};
     use solana_stable_layout::stable_vec::StableVec;
     use std::ops::Deref;
 
@@ -207,7 +207,6 @@ mod tests {
         };
         assert_eq!(size_of::<TestStruct>(), 8);
 
-        // let lamports_rc: Rc<RefCell<&u64>> = Rc::new(RefCell::new(&lamports));
         let rc_as_ptr = test_struct.lamports_rc.as_ptr() as u64;
         let lamports_rc_const_ptr: *const Rc<RefCell<&mut u64>> =
             &test_struct.lamports_rc as *const _;
@@ -303,65 +302,40 @@ mod tests {
         let addr_to_value_addr = container.addr_to_value_addr::<true, true>();
         let slice =
             SliceFatPtr64::<u8>::from_ptr_to_fat_ptr(addr_to_value_addr as usize, mm.clone());
-        // let slice = reconstruct_slice::<u8>(value_addr as usize, data_as_mut_slice.len());
         assert_eq!(slice.to_vec_cloned(), data_as_mut_slice.to_vec());
-        // let value = container.value::<true, true>();
-        // assert_eq!(value, &data);
-
-        // let container = RcRefCellMemLayout::<&mut [u8]>::new(
-        //     mm.clone(),
-        //     PtrType::RcBoxStartPtr(rc_box_start_ptr),
-        // );
-        // let value = container.value::<true, true>();
-        // assert_eq!(value, &data);
-        // let value_vm_addr = container.value_addr::<true, true>();
-        // assert_eq!(
-        //     u64::from_le_bytes(
-        //         reconstruct_slice::<u8>(value_vm_addr as usize, 8)
-        //             .try_into()
-        //             .unwrap()
-        //     ),
-        //     data
-        // );
-        //
-        // let container =
-        //     RcRefCellMemLayout::<&mut [u8]>::new(mm.clone(), PtrType::PtrToValuePtr(rc_as_ptr));
-        // let value = container.value::<true, true>();
-        // assert_eq!(value, &data);
     }
 
     #[test]
     fn stable_vec_of_account_infos_mutations_test() {
-        // type ItemType = u64;
         type ItemType<'a> = AccountInfo<'a>;
         type VecOfItemsType<'a> = StableVec<ItemType<'a>>;
 
         let mmh = MemoryMappingHelper::default();
 
         let num: u64 = 1;
-        let key_1 = Pubkey::new_from_array([num as u8; 32]);
-        let owner_1 = Pubkey::new_from_array([num as u8 + 10; 32]);
+        let key_1 = Pubkey::new_from_array([num as u8; PUBKEY_BYTES]);
+        let owner_1 = Pubkey::new_from_array([num as u8 + 10; PUBKEY_BYTES]);
         let mut lamports_1 = num + 20;
         let rent_epoch_1 = num + 30;
         let mut data_1 = [1, 2, 3].to_vec();
 
         let num: u64 = 2;
-        let key_2 = Pubkey::new_from_array([num as u8; 32]);
-        let owner_2 = Pubkey::new_from_array([num as u8 + 10; 32]);
+        let key_2 = Pubkey::new_from_array([num as u8; PUBKEY_BYTES]);
+        let owner_2 = Pubkey::new_from_array([num as u8 + 10; PUBKEY_BYTES]);
         let mut lamports_2 = num + 20;
         let rent_epoch_2 = num + 30;
         let mut data_2 = [1, 2, 3, 4].to_vec();
 
         let num: u64 = 4;
-        let key_3 = Pubkey::new_from_array([num as u8; 32]);
-        let owner_3 = Pubkey::new_from_array([num as u8 + 10; 32]);
+        let key_3 = Pubkey::new_from_array([num as u8; PUBKEY_BYTES]);
+        let owner_3 = Pubkey::new_from_array([num as u8 + 10; PUBKEY_BYTES]);
         let mut lamports_3 = num + 20;
         let rent_epoch_3 = num + 30;
         let mut data_3 = [1, 2, 3, 4].to_vec();
 
         let num: u64 = 3;
-        let key_4 = Pubkey::new_from_array([num as u8; 32]);
-        let owner_4 = Pubkey::new_from_array([num as u8 + 10; 32]);
+        let key_4 = Pubkey::new_from_array([num as u8; PUBKEY_BYTES]);
+        let owner_4 = Pubkey::new_from_array([num as u8 + 10; PUBKEY_BYTES]);
         let mut lamports_4 = num + 20;
         let rent_epoch_4 = num + 30;
         let mut data_4 = [1, 2, 3, 4].to_vec();
