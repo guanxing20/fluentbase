@@ -1,25 +1,12 @@
 use core::cell::RefCell;
 use fluentbase_runtime::{RuntimeContext, RuntimeContextWrapper};
+use fluentbase_sdk::syscall::SyscallResult;
 use fluentbase_sdk::{
-    bytes::Buf,
-    calc_create4_address,
-    native_api::NativeAPI,
-    Address,
-    Bytes,
-    ContextReader,
-    ContractContextV1,
-    ExitCode,
-    IsAccountEmpty,
-    IsAccountOwnable,
-    IsColdAccess,
-    MetadataAPI,
-    SharedAPI,
-    SharedContextInputV1,
-    StorageAPI,
-    SyscallResult,
-    B256,
-    FUEL_DENOM_RATE,
-    U256,
+    bytes::Buf, calc_create4_address, native_api::NativeAPI, Address, Bytes, ContextReader,
+    ContractContextV1, ExitCode, IsAccountEmpty, IsAccountOwnable, IsColdAccess, MetadataAPI,
+    MetadataStorageAPI, SharedAPI, SharedContextInputV1, StorageAPI, B256,
+    BN254_G1_POINT_COMPRESSED_SIZE, BN254_G1_POINT_DECOMPRESSED_SIZE,
+    BN254_G2_POINT_COMPRESSED_SIZE, BN254_G2_POINT_DECOMPRESSED_SIZE, FUEL_DENOM_RATE, U256,
 };
 use hashbrown::HashMap;
 use std::rc::Rc;
@@ -83,6 +70,12 @@ impl HostTestingContext {
     pub fn visit_inner_storage_mut<F: FnMut(&mut HashMap<(Address, U256), U256>)>(&self, mut f: F) {
         f(&mut self.inner.borrow_mut().persistent_storage)
     }
+    pub fn visit_inner_metadata_storage_mut<F: FnMut(&mut HashMap<(Address, U256), U256>)>(
+        &self,
+        mut f: F,
+    ) {
+        f(&mut self.inner.borrow_mut().metadata_storage)
+    }
     pub fn visit_inner_metadata_mut<F: FnMut(&mut HashMap<(Address, Address), Vec<u8>>)>(
         &self,
         mut f: F,
@@ -99,6 +92,7 @@ struct TestingContextInner {
     native_sdk: RuntimeContextWrapper,
     persistent_storage: HashMap<(Address, U256), U256>,
     metadata: HashMap<(Address, Address), Vec<u8>>,
+    metadata_storage: HashMap<(Address, U256), U256>,
     transient_storage: HashMap<(Address, U256), U256>,
     logs: Vec<(Bytes, Vec<B256>)>,
     ownable_account_address: Option<Address>,
@@ -112,6 +106,7 @@ impl Default for HostTestingContext {
                 native_sdk: RuntimeContextWrapper::new(RuntimeContext::root(0)),
                 persistent_storage: Default::default(),
                 metadata: Default::default(),
+                metadata_storage: Default::default(),
                 transient_storage: Default::default(),
                 logs: vec![],
                 ownable_account_address: None,
@@ -189,12 +184,13 @@ impl MetadataAPI for HostTestingContext {
         let derived_metadata_address =
             calc_create4_address(&account_owner, salt, HostTestingContextNativeAPI::keccak256);
         let target_address = ctx.shared_context_input_v1.contract.address;
-        ctx.metadata
-            .insert(
-                (target_address, derived_metadata_address),
-                metadata.to_vec(),
-            )
-            .expect("metadata account collision");
+        let res = ctx.metadata.insert(
+            (target_address, derived_metadata_address),
+            metadata.to_vec(),
+        );
+        if res.is_some() {
+            panic!("metadata account collision")
+        }
         SyscallResult::new(Default::default(), 0, 0, ExitCode::Ok)
     }
 
@@ -217,6 +213,30 @@ impl MetadataAPI for HostTestingContext {
     }
 }
 
+impl MetadataStorageAPI for HostTestingContext {
+    fn metadata_storage_read(&self, slot: &U256) -> SyscallResult<U256> {
+        let ctx = self.inner.borrow();
+        let account_owner = ctx
+            .ownable_account_address
+            .expect("expected ownable account address");
+        let value = ctx
+            .metadata_storage
+            .get(&(account_owner, *slot))
+            .unwrap_or(&U256::ZERO)
+            .clone();
+        SyscallResult::new(value, 0, 0, ExitCode::Ok)
+    }
+
+    fn metadata_storage_write(&mut self, slot: &U256, value: U256) -> SyscallResult<()> {
+        let mut ctx = self.inner.borrow_mut();
+        let account_owner = ctx
+            .ownable_account_address
+            .expect("expected ownable account address");
+        ctx.metadata_storage.insert((account_owner, *slot), value);
+        SyscallResult::new((), 0, 0, ExitCode::Ok)
+    }
+}
+
 impl SharedAPI for HostTestingContext {
     fn context(&self) -> impl ContextReader {
         self.inner.borrow().shared_context_input_v1.clone()
@@ -224,6 +244,99 @@ impl SharedAPI for HostTestingContext {
 
     fn keccak256(&self, data: &[u8]) -> B256 {
         RuntimeContextWrapper::keccak256(data)
+    }
+
+    fn sha256(data: &[u8]) -> B256 {
+        RuntimeContextWrapper::sha256(data)
+    }
+
+    fn blake3(data: &[u8]) -> B256 {
+        RuntimeContextWrapper::blake3(data)
+    }
+
+    fn poseidon(parameters: u32, endianness: u32, data: &[u8]) -> Result<B256, ExitCode> {
+        RuntimeContextWrapper::poseidon(parameters, endianness, data)
+    }
+
+    fn secp256k1_recover(digest: &B256, sig: &[u8; 64], rec_id: u8) -> Option<[u8; 65]> {
+        RuntimeContextWrapper::secp256k1_recover(digest, sig, rec_id)
+    }
+    fn curve25519_edwards_decompress_validate(p: &[u8; 32]) -> bool {
+        RuntimeContextWrapper::curve25519_edwards_decompress_validate(p)
+    }
+    fn curve25519_edwards_add(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        RuntimeContextWrapper::curve25519_edwards_add(p, q)
+    }
+    fn curve25519_edwards_sub(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        RuntimeContextWrapper::curve25519_edwards_sub(p, q)
+    }
+    fn curve25519_edwards_mul(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        RuntimeContextWrapper::curve25519_edwards_mul(p, q)
+    }
+    fn curve25519_edwards_multiscalar_mul(
+        pairs: &[([u8; 32], [u8; 32])],
+        out: &mut [u8; 32],
+    ) -> bool {
+        RuntimeContextWrapper::curve25519_edwards_multiscalar_mul(pairs, out)
+    }
+    fn curve25519_ristretto_decompress_validate(p: &[u8; 32]) -> bool {
+        RuntimeContextWrapper::curve25519_ristretto_decompress_validate(p)
+    }
+    fn curve25519_ristretto_add(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        RuntimeContextWrapper::curve25519_ristretto_add(p, q)
+    }
+    fn curve25519_ristretto_sub(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        RuntimeContextWrapper::curve25519_ristretto_sub(p, q)
+    }
+    fn curve25519_ristretto_mul(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        RuntimeContextWrapper::curve25519_ristretto_mul(p, q)
+    }
+    fn curve25519_ristretto_multiscalar_mul(
+        pairs: &[([u8; 32], [u8; 32])],
+        out: &mut [u8; 32],
+    ) -> bool {
+        RuntimeContextWrapper::curve25519_ristretto_multiscalar_mul(pairs, out)
+    }
+    fn bn254_add(p: &mut [u8; 64], q: &[u8; 64]) {
+        RuntimeContextWrapper::bn254_add(p, q);
+    }
+    fn bn254_double(p: &mut [u8; 64]) {
+        RuntimeContextWrapper::bn254_double(p);
+    }
+    fn bn254_mul(p: &mut [u8; 64], q: &[u8; 32]) {
+        RuntimeContextWrapper::bn254_mul(p, q);
+    }
+    fn bn254_multi_pairing(elements: &[([u8; 64], [u8; 128])]) -> [u8; 32] {
+        RuntimeContextWrapper::bn254_multi_pairing(elements)
+    }
+    fn bn254_g1_compress(
+        point: &[u8; BN254_G1_POINT_DECOMPRESSED_SIZE],
+    ) -> Result<[u8; BN254_G1_POINT_COMPRESSED_SIZE], ExitCode> {
+        RuntimeContextWrapper::bn254_g1_compress(point)
+    }
+    fn bn254_g1_decompress(
+        point: &[u8; BN254_G1_POINT_COMPRESSED_SIZE],
+    ) -> Result<[u8; BN254_G1_POINT_DECOMPRESSED_SIZE], ExitCode> {
+        RuntimeContextWrapper::bn254_g1_decompress(point)
+    }
+    fn bn254_g2_compress(
+        point: &[u8; BN254_G2_POINT_DECOMPRESSED_SIZE],
+    ) -> Result<[u8; BN254_G2_POINT_COMPRESSED_SIZE], ExitCode> {
+        RuntimeContextWrapper::bn254_g2_compress(point)
+    }
+    fn bn254_g2_decompress(
+        point: &[u8; BN254_G2_POINT_COMPRESSED_SIZE],
+    ) -> Result<[u8; BN254_G2_POINT_DECOMPRESSED_SIZE], ExitCode> {
+        RuntimeContextWrapper::bn254_g2_decompress(point)
+    }
+    fn bn254_fp_mul(p: &mut [u8; 64], q: &[u8; 32]) {
+        RuntimeContextWrapper::bn254_fp_mul(p, q);
+    }
+    fn bn254_fp2_mul(p: &mut [u8; 64], q: &[u8; 32]) {
+        RuntimeContextWrapper::bn254_fp2_mul(p, q);
+    }
+    fn big_mod_exp(base: &[u8], exponent: &[u8], modulus: &mut [u8]) -> Result<(), ExitCode> {
+        RuntimeContextWrapper::big_mod_exp(base, exponent, modulus)
     }
 
     fn read(&self, target: &mut [u8], offset: u32) {
@@ -300,6 +413,10 @@ impl SharedAPI for HostTestingContext {
     }
 
     fn balance(&self, _address: &Address) -> SyscallResult<U256> {
+        unimplemented!("not supported for testing context")
+    }
+
+    fn block_hash(&self, _number: u64) -> SyscallResult<B256> {
         unimplemented!("not supported for testing context")
     }
 

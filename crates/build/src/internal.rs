@@ -49,7 +49,7 @@ pub fn rust_to_wasm(config: RustToWasmConfig) -> PathBuf {
         .exec()
         .unwrap();
     let target_dir: PathBuf = metadata.target_directory.clone().into();
-    let target2_dir = target_dir.join("target2");
+    let target2_dir = target_dir.join("contracts");
 
     let mut args = vec![
         "build".to_string(),
@@ -102,8 +102,9 @@ pub fn rust_to_wasm(config: RustToWasmConfig) -> PathBuf {
 
 pub fn wasm_to_wasmtime(wasm_path: &PathBuf) -> PathBuf {
     let wasm_bytecode = fs::read(wasm_path).unwrap();
+    let config = default_compilation_config();
     let module =
-        compile_wasmtime_module(&wasm_bytecode).expect("failed to compile wasmtime module");
+        compile_wasmtime_module(config, &wasm_bytecode).expect("failed to compile wasmtime module");
     let module_bytes = module
         .serialize()
         .expect("failed to serialize wasm bytecode");
@@ -165,7 +166,7 @@ fn calc_wasm_artifact_name(metadata: &Metadata) -> String {
             .packages
             .iter()
             .find(|p| p.id == program_crate)
-            .unwrap_or_else(|| panic!("cannot find package for {}", program_crate));
+            .unwrap_or_else(|| panic!("cannot find package for {program_crate}"));
         for bin_target in program.targets.iter() {
             let is_bin = bin_target.kind.contains(&TargetKind::Bin)
                 && bin_target.crate_types.contains(&CrateType::Bin);
@@ -200,7 +201,7 @@ pub fn is_tinygo_installed() -> bool {
 /// Generates the `build_output.rs` file, which is included in the contract's `lib.rs`.
 pub fn generate_build_output_file(wasm_path: &PathBuf, rwasm_path: &PathBuf) {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
-    let build_output_path = format!("{}/build_output.rs", out_dir);
+    let build_output_path = format!("{out_dir}/build_output.rs");
 
     let package_name = env::var("CARGO_PKG_NAME").unwrap();
     let rwasm_hash = keccak256(fs::read(rwasm_path).unwrap());
@@ -238,7 +239,7 @@ pub fn build_default_genesis_contract_ext(paths: &[&str]) {
     }
     println!("cargo:rerun-if-changed=src");
     for path in paths {
-        println!("cargo:rerun-if-changed={}", path);
+        println!("cargo:rerun-if-changed={path}");
     }
     println!("cargo:rerun-if-changed=Cargo.toml");
 

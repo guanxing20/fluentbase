@@ -2,30 +2,20 @@ use crate::{
     account::AccountSharedData,
     clock::Slot,
     context::{InstructionContext, InvokeContext, TransactionContext},
-    hash::{Hash, Hasher},
+    hash::Hash,
     loaded_programs::DELAY_VISIBILITY_SLOT_OFFSET,
     solana_program::loader_v4,
 };
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::marker::PhantomData;
 use fluentbase_sdk::{keccak256, Address, SharedAPI, U256};
-use solana_bincode::limited_deserialize;
+use fluentbase_types::{ExitCode, MetadataStorageAPI};
 use solana_instruction::error::InstructionError;
 use solana_pubkey::{Pubkey, PUBKEY_BYTES, SVM_ADDRESS_PREFIX};
 use solana_rbpf::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
     vm::Config,
 };
-
-pub const DEPRECATED_LOADER_COMPUTE_UNITS: u64 = 1_140;
-pub const UPGRADEABLE_LOADER_COMPUTE_UNITS: u64 = 2_370;
-/// Maximum over-the-wire size of a Transaction
-///   1280 is IPv6 minimum MTU
-///   40 bytes is the size of the IPv6 header
-///   8 bytes is the size of the fragment header
-pub const PACKET_DATA_SIZE: usize = 1280 - 40 - 8;
-
-// pub const PACKET_DATA_SIZE: usize = usize::MAX;
 
 /// Max instruction stack depth. This is the maximum nesting of instructions that can happen during
 /// a transaction.
@@ -52,21 +42,35 @@ pub trait HasherImpl {
     fn result(self) -> Self::Output;
 }
 
-pub struct Sha256Hasher(Hasher);
-impl HasherImpl for Sha256Hasher {
+pub struct Sha256Hasher<SDK: SharedAPI> {
+    _phantom: PhantomData<SDK>,
+    data: Vec<u8>,
+    hash: Option<Hash>,
+}
+impl<SDK: SharedAPI> HasherImpl for Sha256Hasher<SDK> {
     const NAME: &'static str = "Sha256";
     type Output = Hash;
 
     fn create_hasher() -> Self {
-        Sha256Hasher(Hasher::default())
+        Self {
+            _phantom: Default::default(),
+            data: vec![],
+            hash: None,
+        }
     }
 
     fn hash(&mut self, val: &[u8]) {
-        self.0.hash(val);
+        self.data.extend_from_slice(val);
+        self.hash = None;
     }
 
-    fn result(self) -> Self::Output {
-        self.0.result()
+    fn result(mut self) -> Self::Output {
+        if let Some(hash) = self.hash {
+            return hash;
+        }
+        let hash: Hash = SDK::sha256(&self.data).0.into();
+        self.hash = Some(hash);
+        hash
     }
 }
 
@@ -101,25 +105,37 @@ impl<SDK: SharedAPI> HasherImpl for Keccak256Hasher<SDK> {
     }
 }
 
-pub struct Blake3Hasher(blake3::Hasher);
-impl HasherImpl for Blake3Hasher {
+pub struct Blake3Hasher<SDK: SharedAPI> {
+    _phantom: PhantomData<SDK>,
+    data: Vec<u8>,
+    hash: Option<[u8; 32]>,
+}
+impl<SDK: SharedAPI> HasherImpl for Blake3Hasher<SDK> {
     const NAME: &'static str = "Blake3";
     type Output = [u8; 32];
 
     fn create_hasher() -> Self {
-        Blake3Hasher(blake3::Hasher::default())
+        Blake3Hasher {
+            _phantom: Default::default(),
+            data: Default::default(),
+            hash: Default::default(),
+        }
     }
 
     fn hash(&mut self, val: &[u8]) {
-        self.0.update(val);
+        self.data.extend_from_slice(val);
+        self.hash = None;
     }
 
-    fn result(self) -> Self::Output {
-        self.0.finalize().as_bytes().clone()
+    fn result(mut self) -> Self::Output {
+        if let Some(hash) = self.hash {
+            return hash;
+        }
+        let hash = SDK::blake3(&self.data).0;
+        self.hash = Some(hash);
+        hash
     }
 }
-
-// declare_id!("NativeLoader1111111111111111111111111111111");
 
 pub fn morph_into_deployment_environment_v1<'a, SDK: SharedAPI>(
     from: Arc<BuiltinProgram<InvokeContext<'a, SDK>>>,
@@ -140,11 +156,10 @@ pub fn morph_into_deployment_environment_v1<'a, SDK: SharedAPI>(
 }
 
 pub fn check_loader_id(id: &Pubkey) -> bool {
-    loader_v4::check_id(id) // || bpf_loader::check_id(id)
+    loader_v4::check_id(id)
 }
 
 pub fn rbpf_config_default(compute_budget: Option<&ComputeBudget>) -> Config {
-    // TODO validate all config variables usages
     Config {
         enable_instruction_tracing: false,
         reject_broken_elfs: true,
@@ -191,157 +206,21 @@ pub fn load_program_from_bytes<'a, SDK: SharedAPI>(
     Ok(loaded_program)
 }
 
-#[macro_export]
-macro_rules! deploy_program {
-    ($invoke_context:expr, $program_id:expr, $loader_key:expr,
-     $account_size:expr, $slot:expr, $drop:expr, $new_programdata:expr $(,)?) => {{
-        use crate::loaded_programs::DELAY_VISIBILITY_SLOT_OFFSET;
-        use solana_rbpf::elf::Executable;
-        use solana_rbpf::verifier::RequisiteVerifier;
-        use crate::common::load_program_from_bytes;
-        use crate::common::morph_into_deployment_environment_v1;
-        use core::sync::atomic::Ordering;
-        use crate::clock::Slot;
-
-        let deployment_slot: Slot = $slot;
-        let environments = $invoke_context.get_environments_for_slot(
-            deployment_slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET)
-        ).map_err(|_e| {
-            // This will never fail since the epoch schedule is already configured.
-            InstructionError::ProgramEnvironmentSetupFailure
-        })?;
-        let deployment_program_runtime_environment = morph_into_deployment_environment_v1(
-            environments.program_runtime_v1.clone(),
-        ).map_err(|_e| {
-            InstructionError::ProgramEnvironmentSetupFailure
-        })?;
-        // Verify using stricter deployment_program_runtime_environment
-        let executable = Executable::<InvokeContext<_>>::load(
-            $new_programdata,
-            Arc::new(deployment_program_runtime_environment),
-        ).map_err(|_err| {
-            InstructionError::InvalidAccountData
-        });
-        let executable = executable?;
-        executable.verify::<RequisiteVerifier>().map_err(|_err| {
-            InstructionError::InvalidAccountData
-        })?;
-        // Reload but with environments.program_runtime_v1
-        let executor = load_program_from_bytes(
-            $new_programdata,
-            $loader_key,
-            $account_size,
-            $slot,
-            environments.program_runtime_v1.clone(),
-            true,
-        )?;
-        if let Some(old_entry) = $invoke_context.program_cache_for_tx_batch.find(&$program_id) {
-            executor.tx_usage_counter.store(
-                old_entry.tx_usage_counter.load(Ordering::Relaxed),
-                Ordering::Relaxed
-            );
-            executor.ix_usage_counter.store(
-                old_entry.ix_usage_counter.load(Ordering::Relaxed),
-                Ordering::Relaxed
-            );
-        }
-        $drop
-        $invoke_context.program_cache_for_tx_batch.replenish($program_id, Arc::new(executor));
-    }};
-}
-
-pub fn common_close_account(
-    authority_address: &Option<Pubkey>,
-    transaction_context: &TransactionContext,
-    instruction_context: &InstructionContext,
-) -> Result<(), InstructionError> {
-    if authority_address.is_none() {
-        return Err(InstructionError::Immutable);
+pub fn pubkey_from_evm_address<const SVM_PREFIX: bool>(value: &Address) -> Pubkey {
+    let mut pk = [0u8; PUBKEY_BYTES];
+    if SVM_PREFIX {
+        pk[0..SVM_ADDRESS_PREFIX.len()].copy_from_slice(&SVM_ADDRESS_PREFIX);
     }
-    if *authority_address
-        != Some(*transaction_context.get_key_of_account_at_index(
-            instruction_context.get_index_of_instruction_account_in_transaction(2)?,
-        )?)
-    {
-        return Err(InstructionError::IncorrectAuthority);
-    }
-    if !instruction_context.is_instruction_account_signer(2)? {
-        return Err(InstructionError::MissingRequiredSignature);
-    }
-
-    let mut close_account =
-        instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-    let mut recipient_account =
-        instruction_context.try_borrow_instruction_account(transaction_context, 1)?;
-
-    recipient_account.checked_add_lamports(close_account.get_lamports())?;
-    close_account.set_lamports(0)?;
-    Ok(())
+    pk[SVM_ADDRESS_PREFIX.len()..].copy_from_slice(value.as_slice());
+    Pubkey::new_from_array(pk)
 }
 
-/// Deserialize with a limit based the maximum amount of data a program can expect to get.
-/// This function should be used in place of direct deserialization to help prevent OOM errors
-pub fn limited_deserialize_packet_size<T>(instruction_data: &[u8]) -> Result<T, InstructionError>
-where
-    T: serde::de::DeserializeOwned,
-{
-    limited_deserialize::<PACKET_DATA_SIZE, _>(instruction_data)
-        .map_err(|_| InstructionError::InvalidInstructionData)
+pub fn pubkey_from_u256(value: &U256) -> Pubkey {
+    Pubkey::new_from_array(value.to_le_bytes())
 }
 
-pub fn write_program_data<SDK: SharedAPI>(
-    program_data_offset: usize,
-    bytes: &[u8],
-    invoke_context: &mut InvokeContext<SDK>,
-) -> Result<(), InstructionError> {
-    let transaction_context = &invoke_context.transaction_context;
-    let instruction_context = transaction_context.get_current_instruction_context()?;
-    let mut program = instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-    let data = program.get_data_mut()?;
-    let write_offset = program_data_offset.saturating_add(bytes.len());
-    if data.len() < write_offset {
-        return Err(InstructionError::AccountDataTooSmall);
-    }
-    data.get_mut(program_data_offset..write_offset)
-        .ok_or(InstructionError::AccountDataTooSmall)?
-        .copy_from_slice(bytes);
-    Ok(())
-}
-
-/// Addition that returns [`InstructionError::InsufficientFunds`] on overflow.
-///
-/// This is an internal utility function.
-#[doc(hidden)]
-pub fn checked_add(a: u64, b: u64) -> Result<u64, InstructionError> {
-    a.checked_add(b).ok_or(InstructionError::InsufficientFunds)
-}
-
-pub fn calculate_max_chunk_size<F>(_create_msg: &F) -> usize
-where
-    F: Fn(u32, Vec<u8>) -> crate::solana_program::message::legacy::Message,
-{
-    PACKET_DATA_SIZE
-        // TODO fix magic constant
-        .saturating_sub(16)
-}
-
-pub fn compile_accounts_for_tx_ctx(
-    working_accounts: Vec<(Pubkey, AccountSharedData)>,
-    program_accounts: Vec<(Pubkey, AccountSharedData)>,
-) -> (Vec<(Pubkey, AccountSharedData)>, u16) {
-    let working_accounts_len = working_accounts.len() as u16;
-    let mut accounts = vec![];
-    accounts.extend(working_accounts);
-    accounts.extend(program_accounts);
-
-    (accounts, working_accounts_len)
-}
-
-pub fn pubkey_from_evm_address(value: &Address) -> Pubkey {
-    let mut new_pk = [0u8; PUBKEY_BYTES];
-    new_pk[0..SVM_ADDRESS_PREFIX.len()].copy_from_slice(&SVM_ADDRESS_PREFIX);
-    new_pk[SVM_ADDRESS_PREFIX.len()..].copy_from_slice(value.as_slice());
-    Pubkey::new_from_array(new_pk)
+pub fn pubkey_to_u256(value: &Pubkey) -> U256 {
+    U256::from_le_bytes(value.to_bytes())
 }
 
 #[inline(always)]
@@ -377,13 +256,95 @@ pub fn evm_balance_from_lamports(value: u64) -> U256 {
     U256::from_be_bytes(bytes) * U256::from(ONE_GWEI)
 }
 
+pub struct GlobalLamportsBalance<SDK: MetadataStorageAPI> {
+    _phantom_data: PhantomData<SDK>,
+}
+
+impl<API: MetadataStorageAPI> GlobalLamportsBalance<API> {
+    pub fn new() -> Self {
+        Self {
+            _phantom_data: Default::default(),
+        }
+    }
+    fn get_u256(sdk: &API, pk: &U256) -> U256 {
+        sdk.metadata_storage_read(&pk)
+            .expect("failed to read balance")
+            .data
+    }
+    pub fn get(sdk: &API, pk: &Pubkey) -> u64 {
+        lamports_from_evm_balance(Self::get_u256(sdk, &pubkey_to_u256(pk)))
+    }
+    fn set_u256(sdk: &mut API, pk: &U256, balance: U256) {
+        let balance_current = sdk
+            .metadata_storage_write(&pk, balance)
+            .expect("failed to write balance");
+    }
+    pub fn set(sdk: &mut API, pk: &Pubkey, lamports: u64) {
+        Self::set_u256(
+            sdk,
+            &pubkey_to_u256(pk),
+            evm_balance_from_lamports(lamports),
+        )
+    }
+    pub fn change<const ADD_OR_SUB: bool>(
+        sdk: &mut API,
+        pk: &Pubkey,
+        lamports_change: u64,
+    ) -> Result<U256, SvmError> {
+        let pk_u256 = pubkey_to_u256(pk);
+        let balance_current = Self::get_u256(sdk, &pk_u256);
+        if lamports_change == 0 {
+            return Ok(balance_current);
+        }
+        let balance_change = evm_balance_from_lamports(lamports_change);
+
+        let balance_new = if ADD_OR_SUB {
+            balance_current.checked_add(balance_change)
+        } else {
+            balance_current.checked_sub(balance_change)
+        };
+        if let Some(balance_new) = balance_new {
+            Self::set_u256(sdk, &pk_u256, balance_new);
+            Ok(balance_new)
+        } else {
+            Err(ExitCode::IntegerOverflow.into())
+        }
+    }
+    pub fn transfer(
+        sdk: &mut API,
+        pk_from: &Pubkey,
+        pk_to: &Pubkey,
+        lamports_change: u64,
+    ) -> Result<(U256, U256), SvmError> {
+        let pk_from_u256 = pubkey_to_u256(pk_from);
+        let pk_to_u256 = pubkey_to_u256(pk_to);
+        let balance_from_current = Self::get_u256(sdk, &pk_from_u256);
+        let balance_to_current = Self::get_u256(sdk, &pk_to_u256);
+        if lamports_change == 0 {
+            return Ok((balance_from_current, balance_to_current));
+        }
+        let balance_change = evm_balance_from_lamports(lamports_change);
+
+        let Some(balance_from_new) = balance_from_current.checked_sub(balance_change) else {
+            return Err(ExitCode::IntegerOverflow.into());
+        };
+        let Some(balance_to_new) = balance_to_current.checked_add(balance_change) else {
+            return Err(ExitCode::IntegerOverflow.into());
+        };
+        Self::set_u256(sdk, &pk_from_u256, balance_from_new);
+        Self::set_u256(sdk, &pk_to_u256, balance_to_new);
+
+        Ok((balance_from_new, balance_to_new))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::common::{evm_balance_from_lamports, lamports_from_evm_balance, ONE_GWEI};
     use fluentbase_sdk::U256;
 
     #[test]
-    fn test_evm_balance_to_lamports_and_vice_versa() {
+    fn test_evm_balance_to_lamports_and_back() {
         let evm_balance = U256::from(ONE_GWEI);
         let lamports_balance = lamports_from_evm_balance(evm_balance);
         assert_eq!(lamports_balance, 1);

@@ -1,13 +1,13 @@
 extern crate solana_rbpf;
 
-use crate::solana_program;
-use alloc::{boxed::Box, str::Utf8Error, string::String, vec, vec::Vec};
-use core::{
-    fmt,
-    fmt::{Display, Formatter},
-};
+use crate::{native_loader, solana_program, system_program};
+use alloc::{boxed::Box, vec, vec::Vec};
+use bincode::error::DecodeError;
+use hashbrown::HashMap;
+use solana_account_info::AccountInfo;
 use solana_bincode::{deserialize, serialize, serialized_size};
-use solana_pubkey::{Pubkey, PubkeyError};
+use solana_clock::Epoch;
+use solana_pubkey::Pubkey;
 use solana_rbpf::{
     ebpf,
     elf::Executable,
@@ -42,98 +42,27 @@ pub fn address_is_aligned<T>(address: u64) -> bool {
         .expect("T to be non-zero aligned")
 }
 
+use crate::account::{ReadableAccount, WritableAccount};
+use crate::common::GlobalLamportsBalance;
+use crate::context::TransactionContext;
+use crate::error::RuntimeError;
+use crate::fluentbase::common::{GlobalBalance, SYSTEM_PROGRAMS_KEYS};
+use crate::native_loader::create_loadable_account_with_fields2;
+use crate::solana_program::loader_v4;
 use crate::{
     account::{
-        to_account,
-        Account,
-        AccountSharedData,
-        InheritableAccountFields,
+        to_account, Account, AccountSharedData, InheritableAccountFields,
         DUMMY_INHERITABLE_ACCOUNT_FIELDS,
     },
     context::BpfAllocator,
     error::SvmError,
     solana_program::sysvar::Sysvar,
 };
-use fluentbase_sdk::{calc_create4_address, keccak256, MetadataAPI, PRECOMPILE_SVM_RUNTIME};
+use fluentbase_sdk::{
+    calc_create4_address, debug_log_ext, keccak256, Bytes, MetadataAPI, PRECOMPILE_SVM_RUNTIME,
+};
+use fluentbase_types::{Address, MetadataStorageAPI, SharedAPI, StorageAPI, B256};
 use solana_rbpf::ebpf::MM_HEAP_START;
-
-/// Error definitions
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum SyscallError {
-    InvalidString(Utf8Error, Vec<u8>),
-    Abort,
-    Panic(String, u64, u64),
-    InvokeContextBorrowFailed,
-    MalformedSignerSeed(Utf8Error, Vec<u8>),
-    BadSeeds(PubkeyError),
-    ProgramNotSupported(Pubkey),
-    UnalignedPointer,
-    TooManySigners,
-    InstructionTooLarge(usize, usize),
-    TooManyAccounts,
-    CopyOverlapping,
-    ReturnDataTooLarge(u64, u64),
-    TooManySlices,
-    InvalidLength,
-    MaxInstructionDataLenExceeded {
-        data_len: u64,
-        max_data_len: u64,
-    },
-    MaxInstructionAccountsExceeded {
-        num_accounts: u64,
-        max_accounts: u64,
-    },
-    MaxInstructionAccountInfosExceeded {
-        num_account_infos: u64,
-        max_account_infos: u64,
-    },
-    InvalidAttribute,
-    InvalidPointer,
-    ArithmeticOverflow,
-}
-
-impl Display for SyscallError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            SyscallError::InvalidString(_, _) => write!(f, "SyscallError::InvalidString"),
-            SyscallError::Abort => write!(f, "SyscallError::Abort"),
-            SyscallError::Panic(_, _, _) => write!(f, "SyscallError::Panic"),
-            SyscallError::InvokeContextBorrowFailed => {
-                write!(f, "SyscallError::InvokeContextBorrowFailed")
-            }
-            SyscallError::MalformedSignerSeed(_, _) => {
-                write!(f, "SyscallError::MalformedSignerSeed")
-            }
-            SyscallError::BadSeeds(_) => write!(f, "SyscallError::BadSeeds"),
-            SyscallError::ProgramNotSupported(_) => write!(f, "SyscallError::ProgramNotSupported"),
-            SyscallError::UnalignedPointer => write!(f, "SyscallError::UnalignedPointer"),
-            SyscallError::TooManySigners => write!(f, "SyscallError::TooManySigners"),
-            SyscallError::InstructionTooLarge(_, _) => {
-                write!(f, "SyscallError::InstructionTooLarge")
-            }
-            SyscallError::TooManyAccounts => write!(f, "SyscallError::TooManyAccounts"),
-            SyscallError::CopyOverlapping => write!(f, "SyscallError::CopyOverlapping"),
-            SyscallError::ReturnDataTooLarge(_, _) => write!(f, "SyscallError::ReturnDataTooLarge"),
-            SyscallError::TooManySlices => write!(f, "SyscallError::TooManySlices"),
-            SyscallError::InvalidLength => write!(f, "SyscallError::InvalidLength"),
-            SyscallError::MaxInstructionDataLenExceeded { .. } => {
-                write!(f, "SyscallError::MaxInstructionDataLenExceeded")
-            }
-            SyscallError::MaxInstructionAccountsExceeded { .. } => {
-                write!(f, "SyscallError::MaxInstructionAccountsExceeded")
-            }
-            SyscallError::MaxInstructionAccountInfosExceeded { .. } => {
-                write!(f, "SyscallError::MaxInstructionAccountInfosExceeded")
-            }
-            SyscallError::InvalidAttribute => write!(f, "SyscallError::InvalidAttribute"),
-            SyscallError::InvalidPointer => write!(f, "SyscallError::InvalidPointer"),
-            SyscallError::ArithmeticOverflow => write!(f, "SyscallError::ArithmeticOverflow"),
-        }
-    }
-}
-
-impl core::error::Error for SyscallError {}
 
 pub fn create_memory_mapping<'a, 'b, C: ContextObject>(
     executable: &'a Executable<C>,
@@ -212,6 +141,31 @@ pub fn create_account_shared_data_for_test<S: Sysvar>(sysvar: &S) -> AccountShar
     ))
 }
 
+pub fn create_account_for_test<S: Sysvar>(sysvar: &S) -> Account {
+    create_account_with_fields(sysvar, DUMMY_INHERITABLE_ACCOUNT_FIELDS)
+}
+
+/// Create `AccountInfo`s
+pub fn create_is_signer_account_infos<'a>(
+    accounts: &'a mut [(&'a Pubkey, bool, &'a mut Account)],
+) -> Vec<AccountInfo<'a>> {
+    accounts
+        .iter_mut()
+        .map(|(key, is_signer, account)| {
+            AccountInfo::new(
+                key,
+                *is_signer,
+                false,
+                &mut account.lamports,
+                &mut account.data,
+                &account.owner,
+                account.executable,
+                account.rent_epoch,
+            )
+        })
+        .collect()
+}
+
 #[macro_export]
 macro_rules! with_mock_invoke_context {
     (
@@ -277,61 +231,156 @@ macro_rules! with_mock_invoke_context {
     };
 }
 
-#[macro_export]
-macro_rules! select_api {
-    ($optional:expr, $alt:expr, $callback:expr) => {
-        if let Some(v) = $optional {
-            $callback(*v)
-        } else {
-            $callback($alt)
-        }
+pub fn is_program_exists<API: MetadataAPI>(
+    api: &API,
+    program_id: &Pubkey,
+) -> Result<bool, SvmError> {
+    let is_exists = if SYSTEM_PROGRAMS_KEYS.contains(program_id) {
+        true
+    } else {
+        let account_metadata = storage_read_metadata_params(api, program_id);
+        account_metadata.is_ok() && account_metadata?.2 > 0
     };
+    Ok(is_exists)
 }
 
-pub fn storage_read_account_data<API: MetadataAPI>(
+pub fn storage_read_metadata_params<API: MetadataAPI>(
     api: &API,
     pubkey: &Pubkey,
-) -> Result<AccountSharedData, SvmError> {
-    let pubkey_hash = keccak256(pubkey.as_ref());
+) -> Result<(B256, Address, u32), SvmError> {
+    // let pubkey_hash = keccak256(pubkey.as_ref());
+    let pubkey: B256 = pubkey.to_bytes().into();
     let derived_metadata_address =
-        calc_create4_address(&PRECOMPILE_SVM_RUNTIME, &pubkey_hash.into(), |v| {
-            keccak256(v)
-        });
+        calc_create4_address(&PRECOMPILE_SVM_RUNTIME, &pubkey.into(), |v| keccak256(v));
     let metadata_size_result = api.metadata_size(&derived_metadata_address);
-    if !metadata_size_result.status.is_ok() {
-        return Err(metadata_size_result.status.into());
-    }
+    // if !metadata_size_result.status.is_ok() {
+    //     return Err(metadata_size_result.status.into());
+    // }
     let metadata_len = metadata_size_result.data.0;
+    Ok((pubkey, derived_metadata_address, metadata_len))
+}
+
+pub fn storage_read_metadata<API: MetadataAPI>(
+    api: &API,
+    pubkey: &Pubkey,
+) -> Result<Bytes, SvmError> {
+    let ((_, derived_metadata_address, metadata_len)) = storage_read_metadata_params(api, pubkey)?;
     let metadata_copy = api.metadata_copy(&derived_metadata_address, 0, metadata_len);
     if !metadata_copy.status.is_ok() {
         return Err(metadata_copy.status.into());
     }
     let buffer = metadata_copy.data;
-    let deserialize_result = deserialize(&buffer);
-    Ok(deserialize_result?)
+    Ok(buffer)
 }
 
-pub fn storage_write_account_data<API: MetadataAPI>(
-    api: &mut API,
+pub fn storage_write_metadata<MAPI: MetadataAPI>(
+    api: &mut MAPI,
     pubkey: &Pubkey,
-    account_data: &AccountSharedData,
+    metadata: Bytes,
 ) -> Result<(), SvmError> {
-    let account_data = serialize(account_data)?;
-    let pubkey_hash = keccak256(pubkey.as_ref());
-    let derived_metadata_address =
-        calc_create4_address(&PRECOMPILE_SVM_RUNTIME, &pubkey_hash.into(), |v| {
-            keccak256(v)
-        });
-    let (metadata_size, _, _, _) = api
-        .metadata_size(&derived_metadata_address)
-        .expect("metadata size")
-        .data;
-    if metadata_size == 0 {
-        api.metadata_create(&pubkey_hash.into(), account_data.into())
+    let ((pubkey_hash, derived_metadata_address, metadata_len)) =
+        storage_read_metadata_params(api, pubkey)?;
+    if metadata_len == 0 {
+        api.metadata_create(&pubkey_hash.into(), metadata)
             .expect("metadata creation failed");
     } else {
-        api.metadata_write(&derived_metadata_address, 0, account_data.into())
+        api.metadata_write(&derived_metadata_address, 0, metadata)
             .expect("metadata write failed");
     }
     Ok(())
+}
+
+pub fn storage_read_account_data<API: MetadataAPI + MetadataStorageAPI>(
+    api: &API,
+    pk: &Pubkey,
+) -> Result<AccountSharedData, SvmError> {
+    if pk == &system_program::id() {
+        return Ok(create_loadable_account_with_fields2(
+            "system_program_id",
+            &native_loader::id(),
+        ));
+    } else if pk == &loader_v4::id() {
+        return Ok(create_loadable_account_with_fields2(
+            "loader_v4_id",
+            &native_loader::id(),
+        ));
+    };
+    let buffer = storage_read_metadata(api, pk)?;
+    if buffer.len() < 1 + size_of::<Pubkey>() {
+        return Err(SvmError::RuntimeError(RuntimeError::InvalidLength));
+    }
+    let executable = buffer[0] > 0;
+    let owner = Pubkey::new_from_array(buffer[1..1 + size_of::<Pubkey>()].try_into().unwrap());
+    let data = &buffer[1 + size_of::<Pubkey>()..];
+    let lamports = GlobalLamportsBalance::get(api, &pk);
+    let account_data = AccountSharedData::create(
+        lamports,
+        data.to_vec(),
+        owner,
+        executable,
+        Default::default(),
+    );
+    Ok(account_data)
+}
+
+pub fn storage_write_account_data<API: MetadataAPI + MetadataStorageAPI>(
+    api: &mut API,
+    pk: &Pubkey,
+    account_data: &AccountSharedData,
+) -> Result<(), SvmError> {
+    let mut buffer = vec![0u8; 1 + size_of::<Pubkey>() + account_data.data().len()];
+    buffer[0] = account_data.executable() as u8;
+    buffer[1..1 + size_of::<Pubkey>()].copy_from_slice(account_data.owner().as_ref());
+    buffer[1 + size_of::<Pubkey>()..].copy_from_slice(account_data.data());
+    storage_write_metadata(api, pk, buffer.into())?;
+    GlobalLamportsBalance::set(api, &pk, account_data.lamports());
+    Ok(())
+}
+
+pub(crate) fn storage_read_account_data_or_default<API: MetadataAPI + MetadataStorageAPI>(
+    api: &API,
+    pk: &Pubkey,
+    space_default: usize,
+    owner_default: Option<&Pubkey>,
+) -> AccountSharedData {
+    storage_read_account_data(api, pk).unwrap_or_else(|_e| {
+        let lamports = GlobalBalance::get(api, pk);
+        AccountSharedData::new(
+            lamports,
+            space_default,
+            owner_default.unwrap_or(&system_program::id()),
+        )
+    })
+}
+
+pub fn extract_accounts(
+    transaction_context: &TransactionContext,
+) -> Result<HashMap<Pubkey, AccountSharedData>, SvmError> {
+    let mut accounts =
+        HashMap::with_capacity(transaction_context.get_number_of_accounts() as usize);
+    for account_idx in 0..transaction_context.get_number_of_accounts() {
+        let account_key = transaction_context.get_key_of_account_at_index(account_idx)?;
+        let account_data = transaction_context.get_account_at_index(account_idx)?;
+        accounts.insert(
+            account_key.clone(),
+            account_data.borrow().to_account_shared_data(),
+        );
+    }
+    Ok(accounts)
+}
+
+pub fn update_accounts(
+    transaction_context: &mut TransactionContext,
+    accounts: &HashMap<Pubkey, AccountSharedData>,
+) {
+    for (pk, data) in accounts {
+        let idx = transaction_context
+            .find_index_of_account(pk)
+            .expect("each account must be presented");
+        let mut account = transaction_context
+            .get_account_at_index(idx)
+            .expect("each account must be presented");
+        // let mut_data = account.borrow_mut().data_as_mut_slice();
+        *account.borrow_mut() = data.clone();
+    }
 }

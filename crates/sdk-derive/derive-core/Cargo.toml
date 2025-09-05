@@ -9,9 +9,10 @@ license.workspace = true
 
 readme.workspace = true
 repository.workspace = true
+version.workspace = true
 
 [dependencies]
-alloy-sol-macro-input = "1.1.0"
+alloy-sol-macro-input = { version = "1.1.0", default-features = false, features = ["json"] }
 anyhow.workspace = true
 convert_case = "0.8.0"
 crypto-hashes = { version = "0.10.0", default-features = false, features = ["include_weak"] }
@@ -32,3 +33,6 @@ tracing = { version = "0.1.40", default-features = false }
 bytes = "1.0"
 insta = { version = "1.43.1", features = ["yaml"] }
 prettyplease = "0.2.32"
+
+[features]
+default = []

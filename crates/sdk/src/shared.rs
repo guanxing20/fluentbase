@@ -8,43 +8,21 @@ use crate::{
 use alloc::vec;
 use core::cell::RefCell;
 use fluentbase_types::{
-    native_api::NativeAPI,
-    Address,
-    Bytes,
-    ContextReader,
-    ExitCode,
-    IsAccountEmpty,
-    IsAccountOwnable,
-    IsColdAccess,
-    MetadataAPI,
-    SharedAPI,
-    SharedContextInputV1,
-    StorageAPI,
-    SyscallResult,
-    B256,
-    STATE_MAIN,
-    SYSCALL_ID_BALANCE,
-    SYSCALL_ID_CALL,
-    SYSCALL_ID_CALL_CODE,
-    SYSCALL_ID_CODE_COPY,
-    SYSCALL_ID_CODE_HASH,
-    SYSCALL_ID_CODE_SIZE,
-    SYSCALL_ID_CREATE,
-    SYSCALL_ID_CREATE2,
-    SYSCALL_ID_DELEGATE_CALL,
-    SYSCALL_ID_DESTROY_ACCOUNT,
-    SYSCALL_ID_EMIT_LOG,
-    SYSCALL_ID_METADATA_COPY,
-    SYSCALL_ID_METADATA_CREATE,
-    SYSCALL_ID_METADATA_SIZE,
-    SYSCALL_ID_METADATA_WRITE,
-    SYSCALL_ID_SELF_BALANCE,
-    SYSCALL_ID_STATIC_CALL,
-    SYSCALL_ID_STORAGE_READ,
-    SYSCALL_ID_STORAGE_WRITE,
-    SYSCALL_ID_TRANSIENT_READ,
-    SYSCALL_ID_TRANSIENT_WRITE,
-    U256,
+    native_api::NativeAPI, syscall::SyscallResult, syscall::SYSCALL_ID_BALANCE,
+    syscall::SYSCALL_ID_BLOCK_HASH, syscall::SYSCALL_ID_CALL, syscall::SYSCALL_ID_CALL_CODE,
+    syscall::SYSCALL_ID_CODE_COPY, syscall::SYSCALL_ID_CODE_HASH, syscall::SYSCALL_ID_CODE_SIZE,
+    syscall::SYSCALL_ID_CREATE, syscall::SYSCALL_ID_CREATE2, syscall::SYSCALL_ID_DELEGATE_CALL,
+    syscall::SYSCALL_ID_DESTROY_ACCOUNT, syscall::SYSCALL_ID_EMIT_LOG,
+    syscall::SYSCALL_ID_METADATA_COPY, syscall::SYSCALL_ID_METADATA_CREATE,
+    syscall::SYSCALL_ID_METADATA_SIZE, syscall::SYSCALL_ID_METADATA_STORAGE_READ,
+    syscall::SYSCALL_ID_METADATA_STORAGE_WRITE, syscall::SYSCALL_ID_METADATA_WRITE,
+    syscall::SYSCALL_ID_SELF_BALANCE, syscall::SYSCALL_ID_STATIC_CALL,
+    syscall::SYSCALL_ID_STORAGE_READ, syscall::SYSCALL_ID_STORAGE_WRITE,
+    syscall::SYSCALL_ID_TRANSIENT_READ, syscall::SYSCALL_ID_TRANSIENT_WRITE, Address, Bytes,
+    ContextReader, ExitCode, IsAccountEmpty, IsAccountOwnable, IsColdAccess, MetadataAPI,
+    MetadataStorageAPI, SharedAPI, SharedContextInputV1, StorageAPI, B256,
+    BN254_G1_POINT_COMPRESSED_SIZE, BN254_G1_POINT_DECOMPRESSED_SIZE,
+    BN254_G2_POINT_COMPRESSED_SIZE, BN254_G2_POINT_DECOMPRESSED_SIZE, STATE_MAIN, U256,
 };
 
 pub struct SharedContextImpl<API: NativeAPI> {
@@ -187,6 +165,29 @@ impl<API: NativeAPI> MetadataAPI for SharedContextImpl<API> {
     }
 }
 
+impl<API: NativeAPI> MetadataStorageAPI for SharedContextImpl<API> {
+    fn metadata_storage_read(&self, slot: &U256) -> SyscallResult<U256> {
+        let (fuel_consumed, fuel_refunded, exit_code) = self.native_sdk.exec(
+            SYSCALL_ID_METADATA_STORAGE_READ,
+            &slot.to_le_bytes::<{ U256::BYTES }>(),
+            None,
+            STATE_MAIN,
+        );
+        let value = U256::from_le_slice(&self.native_sdk.return_data());
+        SyscallResult::new(value, fuel_consumed, fuel_refunded, exit_code)
+    }
+
+    fn metadata_storage_write(&mut self, slot: &U256, value: U256) -> SyscallResult<()> {
+        let mut input = [0u8; U256::BYTES * 2];
+        input[..U256::BYTES].copy_from_slice(slot.as_le_slice());
+        input[U256::BYTES..].copy_from_slice(&value.to_le_bytes::<{ U256::BYTES }>());
+        let (fuel_consumed, fuel_refunded, exit_code) =
+            self.native_sdk
+                .exec(SYSCALL_ID_METADATA_STORAGE_WRITE, &input, None, STATE_MAIN);
+        SyscallResult::new((), fuel_consumed, fuel_refunded, exit_code)
+    }
+}
+
 /// SharedContextImpl always created from input
 impl<API: NativeAPI> SharedAPI for SharedContextImpl<API> {
     fn context(&self) -> impl ContextReader {
@@ -195,6 +196,120 @@ impl<API: NativeAPI> SharedAPI for SharedContextImpl<API> {
 
     fn keccak256(&self, data: &[u8]) -> B256 {
         API::keccak256(data)
+    }
+
+    fn sha256(data: &[u8]) -> B256 {
+        API::sha256(data)
+    }
+
+    fn blake3(data: &[u8]) -> B256 {
+        API::blake3(data)
+    }
+
+    fn poseidon(parameters: u32, endianness: u32, data: &[u8]) -> Result<B256, ExitCode> {
+        API::poseidon(parameters, endianness, data)
+    }
+
+    fn secp256k1_recover(digest: &B256, sig: &[u8; 64], rec_id: u8) -> Option<[u8; 65]> {
+        API::secp256k1_recover(digest, sig, rec_id)
+    }
+
+    fn curve25519_edwards_decompress_validate(p: &[u8; 32]) -> bool {
+        API::curve25519_edwards_decompress_validate(p)
+    }
+
+    fn curve25519_edwards_add(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        API::curve25519_edwards_add(p, q)
+    }
+
+    fn curve25519_edwards_sub(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        API::curve25519_edwards_sub(p, q)
+    }
+
+    fn curve25519_edwards_mul(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        API::curve25519_edwards_mul(p, q)
+    }
+
+    fn curve25519_edwards_multiscalar_mul(
+        pairs: &[([u8; 32], [u8; 32])],
+        out: &mut [u8; 32],
+    ) -> bool {
+        API::curve25519_edwards_multiscalar_mul(pairs, out)
+    }
+
+    fn curve25519_ristretto_decompress_validate(p: &[u8; 32]) -> bool {
+        API::curve25519_ristretto_decompress_validate(p)
+    }
+
+    fn curve25519_ristretto_add(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        API::curve25519_ristretto_add(p, q)
+    }
+
+    fn curve25519_ristretto_sub(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        API::curve25519_ristretto_sub(p, q)
+    }
+
+    fn curve25519_ristretto_mul(p: &mut [u8; 32], q: &[u8; 32]) -> bool {
+        API::curve25519_ristretto_mul(p, q)
+    }
+
+    fn curve25519_ristretto_multiscalar_mul(
+        pairs: &[([u8; 32], [u8; 32])],
+        out: &mut [u8; 32],
+    ) -> bool {
+        API::curve25519_ristretto_multiscalar_mul(pairs, out)
+    }
+
+    fn bn254_add(p: &mut [u8; 64], q: &[u8; 64]) {
+        API::bn254_add(p, q)
+    }
+
+    fn bn254_double(p: &mut [u8; 64]) {
+        API::bn254_double(p)
+    }
+
+    fn bn254_mul(p: &mut [u8; 64], q: &[u8; 32]) {
+        API::bn254_mul(p, q)
+    }
+
+    fn bn254_multi_pairing(elements: &[([u8; 64], [u8; 128])]) -> [u8; 32] {
+        API::bn254_multi_pairing(elements)
+    }
+
+    fn bn254_g1_compress(
+        point: &[u8; BN254_G1_POINT_DECOMPRESSED_SIZE],
+    ) -> Result<[u8; BN254_G1_POINT_COMPRESSED_SIZE], ExitCode> {
+        API::bn254_g1_compress(point)
+    }
+
+    fn bn254_g1_decompress(
+        point: &[u8; BN254_G1_POINT_COMPRESSED_SIZE],
+    ) -> Result<[u8; BN254_G1_POINT_DECOMPRESSED_SIZE], ExitCode> {
+        API::bn254_g1_decompress(point)
+    }
+
+    fn bn254_g2_compress(
+        point: &[u8; BN254_G2_POINT_DECOMPRESSED_SIZE],
+    ) -> Result<[u8; BN254_G2_POINT_COMPRESSED_SIZE], ExitCode> {
+        API::bn254_g2_compress(point)
+    }
+
+    fn bn254_g2_decompress(
+        point: &[u8; BN254_G2_POINT_COMPRESSED_SIZE],
+    ) -> Result<[u8; BN254_G2_POINT_DECOMPRESSED_SIZE], ExitCode> {
+        API::bn254_g2_decompress(point)
+    }
+
+    fn bn254_fp_mul(p: &mut [u8; 64], q: &[u8; 32]) {
+        API::bn254_fp_mul(p, q)
+    }
+
+    fn bn254_fp2_mul(p: &mut [u8; 64], q: &[u8; 32]) {
+        API::bn254_fp2_mul(p, q)
+    }
+
+    fn big_mod_exp(base: &[u8], exponent: &[u8], modulus: &mut [u8]) -> Result<(), ExitCode> {
+        API::big_mod_exp(base, exponent, modulus)
     }
 
     fn read(&self, target: &mut [u8], offset: u32) {
@@ -301,6 +416,21 @@ impl<API: NativeAPI> SharedAPI for SharedContextImpl<API> {
             self.native_sdk.read_output(&mut output, 0);
         };
         let value = U256::from_le_slice(&output);
+        SyscallResult::new(value, fuel_consumed, fuel_refunded, exit_code)
+    }
+
+    fn block_hash(&self, block_number: u64) -> SyscallResult<B256> {
+        let (fuel_consumed, fuel_refunded, exit_code) = self.native_sdk.exec(
+            SYSCALL_ID_BLOCK_HASH,
+            &block_number.to_le_bytes(),
+            None,
+            STATE_MAIN,
+        );
+        let mut output = [0u8; B256::len_bytes()];
+        if SyscallResult::is_ok(exit_code) {
+            self.native_sdk.read_output(&mut output, 0);
+        }
+        let value = B256::from_slice(&output);
         SyscallResult::new(value, fuel_consumed, fuel_refunded, exit_code)
     }
 

@@ -4,22 +4,20 @@ mod tests {
     use core::str::from_utf8;
     use curve25519_dalek::{
         constants::{ED25519_BASEPOINT_POINT, RISTRETTO_BASEPOINT_POINT},
-        traits::Identity,
-        EdwardsPoint,
+        EdwardsPoint, RistrettoPoint,
+    };
+    use fluentbase_runtime::instruction::weierstrass_compress_decompress::{
+        ConfigG1Compress, ConfigG1Decompress, ConfigG2Compress, ConfigG2Decompress,
+        SyscallWeierstrassCompressDecompressAssign,
     };
     use fluentbase_sdk::{
-        address,
-        Address,
-        ContextReader,
-        ContractContextV1,
-        SharedAPI,
-        PRECOMPILE_SVM_RUNTIME,
-        U256,
+        address, Address, ContextReader, ContractContextV1, SharedAPI, PRECOMPILE_SVM_RUNTIME, U256,
     };
     use fluentbase_sdk_testing::EvmTestingContext;
+    use fluentbase_svm::helpers::storage_write_metadata;
     use fluentbase_svm::{
         account::{AccountSharedData, ReadableAccount, WritableAccount},
-        common::{evm_address_from_pubkey, evm_balance_from_lamports, pubkey_from_evm_address},
+        common::{evm_balance_from_lamports, pubkey_from_evm_address},
         fluentbase::common::BatchMessage,
         helpers::storage_read_account_data,
         pubkey::Pubkey,
@@ -29,65 +27,52 @@ mod tests {
             loader_v4::LoaderV4State,
             message::Message,
         },
-        system_program,
+        system_program, token_2022,
     };
+    use fluentbase_svm_shared::test_structs::{EvmCall, Invoke, Transfer};
     use fluentbase_svm_shared::{
         bincode_helpers::serialize,
         test_structs::{
-            AltBn128Compression,
-            Blake3,
-            CreateAccountAndModifySomeData1,
-            CurveGroupOp,
-            CurveMultiscalarMultiplication,
-            CurvePointValidation,
-            Keccak256,
-            Poseidon,
-            SetGetReturnData,
-            Sha256,
-            SolBigModExp,
-            SolSecp256k1Recover,
-            SyscallAltBn128,
-            TestCommand,
+            AltBn128Compression, Blake3, CreateAccountAndModifySomeData1, CurveGroupOp,
+            CurveMultiscalarMultiplication, CurvePointValidation, Keccak256, Poseidon,
+            SetGetReturnData, Sha256, SolBigModExp, SolSecp256k1Recover, SyscallAltBn128,
+            TestCommand, EXPECTED_RET_ERR, EXPECTED_RET_OK,
         },
+    };
+    use fluentbase_types::{
+        helpers::convert_endianness_fixed, BN254_G1_POINT_COMPRESSED_SIZE,
+        BN254_G1_POINT_DECOMPRESSED_SIZE, BN254_G2_POINT_COMPRESSED_SIZE,
+        BN254_G2_POINT_DECOMPRESSED_SIZE, PRECOMPILE_SHA256,
     };
     use hex_literal::hex;
     use rand::random_range;
     use serde::Deserialize;
+    use sha2::Digest;
     use solana_bn254::{
         compression::prelude::{
-            alt_bn128_g1_compress,
-            alt_bn128_g1_decompress,
-            alt_bn128_g2_compress,
-            alt_bn128_g2_decompress,
-            convert_endianness,
-            ALT_BN128_G1_COMPRESS,
-            ALT_BN128_G1_DECOMPRESS,
-            ALT_BN128_G2_COMPRESS,
-            ALT_BN128_G2_DECOMPRESS,
+            alt_bn128_g1_compress, alt_bn128_g1_decompress, alt_bn128_g2_compress,
+            alt_bn128_g2_decompress, ALT_BN128_G1_COMPRESS, ALT_BN128_G1_DECOMPRESS,
+            ALT_BN128_G2_COMPRESS, ALT_BN128_G2_DECOMPRESS,
         },
-        prelude::{
-            alt_bn128_addition,
-            alt_bn128_multiplication,
-            alt_bn128_pairing,
-            ALT_BN128_ADD,
-            ALT_BN128_MUL,
-            ALT_BN128_PAIRING,
-        },
+        prelude::{alt_bn128_addition, ALT_BN128_ADD, ALT_BN128_MUL, ALT_BN128_PAIRING},
+        target_arch::{alt_bn128_multiplication, alt_bn128_pairing},
     };
     use solana_curve25519::{
         edwards::{
-            add_edwards,
-            multiply_edwards,
-            multiscalar_multiply_edwards,
-            subtract_edwards,
+            add_edwards, multiply_edwards, multiscalar_multiply_edwards, subtract_edwards,
             PodEdwardsPoint,
+        },
+        ristretto::{
+            add_ristretto, multiply_ristretto, multiscalar_multiply_ristretto, subtract_ristretto,
+            PodRistrettoPoint,
         },
         scalar::PodScalar,
     };
     use solana_poseidon::{Endianness, Parameters};
     use std::{fs::File, io::Read, ops::Neg, time::Instant};
 
-    const DEPLOYER_ADDRESS: Address = address!("1231238908230948230948209348203984029834");
+    const DEPLOYER_ADDRESS1: Address = address!("1231238908230948230948209348203984029834");
+    const DEPLOYER_ADDRESS2: Address = address!("1231238928230949230948209148203584029234");
 
     pub fn process_test_commands(
         ctx: &mut EvmTestingContext,
@@ -117,7 +102,7 @@ mod tests {
             println!("exec started");
             let measure = Instant::now();
             let result = ctx.call_evm_tx_simple(
-                DEPLOYER_ADDRESS,
+                DEPLOYER_ADDRESS1,
                 contract_address.clone(),
                 input.into(),
                 None,
@@ -160,16 +145,15 @@ mod tests {
 
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
 
         let program_bytes = account_with_program.data().to_vec();
-        ctx.add_balance(DEPLOYER_ADDRESS, U256::from(1e18));
+        ctx.add_balance(DEPLOYER_ADDRESS1, U256::from(1e18));
 
         let measure = Instant::now();
         let (_contract_address, _gas_used) =
-            ctx.deploy_evm_tx_with_gas(DEPLOYER_ADDRESS, program_bytes.into());
+            ctx.deploy_evm_tx_with_gas(DEPLOYER_ADDRESS1, program_bytes.into());
         println!("deploy took: {:.2?}", measure.elapsed());
     }
 
@@ -177,30 +161,33 @@ mod tests {
         ctx: &mut EvmTestingContext,
         account_with_program: &AccountSharedData,
         seed1: &[u8],
-        payer_lamports: u64,
+        payer_initial_lamports: u64,
     ) -> (Pubkey, Pubkey, Pubkey, Address) {
         ctx.sdk.set_ownable_account_address(PRECOMPILE_SVM_RUNTIME);
         assert_eq!(ctx.sdk.context().block_number(), 0);
 
         // setup initial accounts
 
-        let pk_payer = pubkey_from_evm_address(&DEPLOYER_ADDRESS);
-        ctx.add_balance(DEPLOYER_ADDRESS, evm_balance_from_lamports(payer_lamports));
+        let pk_deployer1 = pubkey_from_evm_address::<true>(&DEPLOYER_ADDRESS1);
+        ctx.add_balance(
+            DEPLOYER_ADDRESS1,
+            evm_balance_from_lamports(payer_initial_lamports),
+        );
 
         // deploy and get exec contract
 
         let program_bytes = account_with_program.data().to_vec();
         let measure = Instant::now();
         let (contract_address, _gas) =
-            ctx.deploy_evm_tx_with_gas(DEPLOYER_ADDRESS, program_bytes.into());
+            ctx.deploy_evm_tx_with_gas(DEPLOYER_ADDRESS1, program_bytes.into());
         println!("deploy took: {:.2?}", measure.elapsed());
 
-        let pk_exec = pubkey_from_evm_address(&contract_address);
+        let pk_contract = pubkey_from_evm_address::<true>(&contract_address);
 
-        let seeds = &[seed1, pk_payer.as_ref()];
-        let (pk_new, _bump) = Pubkey::find_program_address(seeds, &pk_exec);
+        let seeds = &[seed1, pk_deployer1.as_ref()];
+        let (pk_new, _bump) = Pubkey::find_program_address(seeds, &pk_contract);
 
-        (pk_payer, pk_exec, pk_new, contract_address)
+        (pk_deployer1, pk_contract, pk_new, contract_address)
     }
 
     #[test]
@@ -210,21 +197,35 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
-        let payer_lamports = 101;
+        let deployer1_initial_lamports = 101;
         let seed1 = b"seed";
 
-        let (pk_payer, pk_exec, pk_new, contract_address) =
-            svm_deploy(&mut ctx, &account_with_program, seed1, payer_lamports);
+        let (pk_deployer1, pk_contract, pk_new, contract_address) = svm_deploy(
+            &mut ctx,
+            &account_with_program,
+            seed1,
+            deployer1_initial_lamports,
+        );
+        let pk_deployer2 = pubkey_from_evm_address::<true>(&DEPLOYER_ADDRESS2);
+        // some balance for gas payment
+        ctx.add_balance(DEPLOYER_ADDRESS2, evm_balance_from_lamports(1));
+
+        let deployer1_balance = ctx.get_balance(DEPLOYER_ADDRESS1);
+        println!("deployer1 balance: {:?}", deployer1_balance);
+
+        ctx.commit_db_to_sdk();
 
         // exec
 
-        let space: u32 = 101;
+        let space: u32 = 99;
+        let deployer1_lamports = 30;
+        let deployer1_lamports_to_send = 6;
 
+        let mut new_account_lamports = deployer1_lamports_to_send;
         let test_command_data = CreateAccountAndModifySomeData1 {
-            lamports_to_send: 12,
+            lamports_to_send: deployer1_lamports_to_send,
             space,
             seeds: vec![seed1.to_vec()],
             byte_n_to_set: random_range(0..space),
@@ -239,10 +240,10 @@ mod tests {
         );
 
         let instructions = vec![Instruction::new_with_bincode(
-            pk_exec.clone(),
+            pk_contract.clone(),
             &instruction_data,
             vec![
-                AccountMeta::new(pk_payer, true),
+                AccountMeta::new(pk_deployer1, true),
                 AccountMeta::new(pk_new, false),
                 AccountMeta::new(system_program_id, false),
             ],
@@ -251,62 +252,438 @@ mod tests {
         let mut batch_message = BatchMessage::new(None);
         batch_message.clear().append_one(message);
         let input = serialize(&batch_message).unwrap();
-        let measure = Instant::now();
-        let result =
-            ctx.call_evm_tx_simple(DEPLOYER_ADDRESS, contract_address, input.into(), None, None);
-        println!("exec took: {:.2?}", measure.elapsed());
+        let result = ctx.call_evm_tx_simple(
+            DEPLOYER_ADDRESS1,
+            contract_address,
+            input.clone().into(),
+            None,
+            Some(evm_balance_from_lamports(deployer1_lamports)),
+        );
+        // deployer1_lamports -= deployer1_lamports_to_send;
         let output = result.output().unwrap();
         if output.len() > 0 {
             let out_text = from_utf8(output).unwrap();
             println!("output.len {} output '{}'", output.len(), out_text);
         }
-        let output = result.output().unwrap_or_default();
         assert!(result.is_success());
+
+        ctx.commit_db_to_sdk();
+
+        let output = result.output().unwrap_or_default();
         let expected_output = hex!("");
         assert_eq!(hex::encode(expected_output), hex::encode(output));
 
-        ctx.db_storage_to_sdk();
-
-        ctx.sdk = ctx.sdk.with_contract_context(ContractContextV1 {
-            address: contract_address,
-            ..Default::default()
-        });
-
-        let exec_account: AccountSharedData = storage_read_account_data(&ctx.sdk, &pk_exec)
-            .expect(format!("failed to read exec account data: {}", pk_exec).as_str());
-        assert_eq!(exec_account.lamports(), 0);
+        let contract_account = storage_read_account_data(&ctx.sdk, &pk_contract)
+            .expect(format!("failed to read exec account data: {}", pk_contract).as_str());
+        assert_eq!(contract_account.lamports(), 0);
         assert_eq!(
-            exec_account.data().len(),
+            contract_account.data().len(),
             LoaderV4State::program_data_offset() + account_with_program.data().len()
         );
         assert_eq!(
-            &exec_account.data()[LoaderV4State::program_data_offset()..],
+            &contract_account.data()[LoaderV4State::program_data_offset()..],
             account_with_program.data()
         );
 
-        let payer_account = storage_read_account_data(&ctx.sdk, &pk_payer).expect(
-            format!(
-                "failed to read payer {} (address:{}) account data",
-                pk_payer,
-                evm_address_from_pubkey::<true>(&pk_payer)
-                    .expect("pk payer must be evm compatible")
-            )
-            .as_str(),
-        );
-        assert_eq!(
-            payer_account.lamports(),
-            payer_lamports - 1 - test_command_data.lamports_to_send
-        );
-        assert_eq!(payer_account.data().len(), 0);
+        let deployer1_account = storage_read_account_data(&ctx.sdk, &pk_deployer1)
+            .expect("failed to read payer account data");
+        assert_eq!(0, deployer1_account.lamports()); // we returned all lamports back to evm account
+        assert_eq!(deployer1_account.data().len(), 0);
 
         let new_account = storage_read_account_data(&ctx.sdk, &pk_new)
             .expect(format!("failed to read new account data: {}", pk_new).as_str());
-        assert_eq!(new_account.lamports(), test_command_data.lamports_to_send);
+        assert_eq!(test_command_data.lamports_to_send, new_account.lamports());
         assert_eq!(new_account.data().len(), space as usize);
         assert_eq!(
             new_account.data()[test_command_data.byte_n_to_set as usize],
             test_command_data.byte_n_value
         );
+
+        // create the same new account (pk_new) inside solana app - must fail
+
+        let test_command_data = CreateAccountAndModifySomeData1 {
+            lamports_to_send: deployer1_lamports_to_send,
+            space,
+            seeds: vec![seed1.to_vec()],
+            byte_n_to_set: random_range(0..space),
+            byte_n_value: rand::random(),
+        };
+        let test_command: TestCommand = test_command_data.clone().into();
+        let instruction_data = serialize(&test_command).unwrap();
+        println!(
+            "instruction_data ({}): {:x?}",
+            instruction_data.len(),
+            &instruction_data
+        );
+        let instructions = vec![Instruction::new_with_bincode(
+            pk_contract.clone(),
+            &instruction_data,
+            vec![
+                AccountMeta::new(pk_deployer1, true),
+                AccountMeta::new(pk_new, false),
+                AccountMeta::new(system_program_id, false),
+            ],
+        )];
+        let message = Message::new(&instructions, None);
+        let mut batch_message = BatchMessage::new(None);
+        batch_message.clear().append_one(message);
+        let input = serialize(&batch_message).unwrap();
+        let result = ctx.call_evm_tx_simple(
+            DEPLOYER_ADDRESS1,
+            contract_address,
+            input.clone().into(),
+            None,
+            None,
+        );
+        assert!(!result.is_success());
+
+        ctx.commit_db_to_sdk();
+
+        // transfer lamports to the previously created account (pk_new)
+
+        let deployer1_lamports_to_send = deployer1_lamports_to_send - 1;
+        // deployer1_lamports -= deployer1_lamports_to_send;
+        new_account_lamports += deployer1_lamports_to_send;
+        let test_command_data = Transfer {
+            lamports: deployer1_lamports_to_send,
+            seeds: vec![seed1.to_vec()],
+        };
+        let test_command: TestCommand = test_command_data.clone().into();
+        let instruction_data = serialize(&test_command).unwrap();
+        println!(
+            "instruction_data ({}): {:x?}",
+            instruction_data.len(),
+            &instruction_data
+        );
+        let instructions = vec![Instruction::new_with_bincode(
+            pk_contract.clone(),
+            &instruction_data,
+            vec![
+                AccountMeta::new(pk_deployer1, true),
+                AccountMeta::new(pk_new, false),
+                AccountMeta::new(system_program_id, false),
+            ],
+        )];
+        let message = Message::new(&instructions, None);
+        let mut batch_message = BatchMessage::new(None);
+        batch_message.clear().append_one(message);
+        let input = serialize(&batch_message).unwrap();
+        let result = ctx.call_evm_tx_simple(
+            DEPLOYER_ADDRESS1,
+            contract_address,
+            input.clone().into(),
+            None,
+            Some(evm_balance_from_lamports(deployer1_lamports)),
+        );
+        assert!(result.is_success());
+
+        ctx.commit_db_to_sdk();
+
+        let new_account = storage_read_account_data(&ctx.sdk, &pk_new)
+            .expect(format!("failed to read new account data: {}", pk_new).as_str());
+        assert_eq!(new_account_lamports, new_account.lamports());
+        assert_eq!(new_account.data().len(), space as usize);
+
+        let deployer1_account = storage_read_account_data(&ctx.sdk, &pk_deployer1)
+            .expect("failed to read payer account data");
+        assert_eq!(0, deployer1_account.lamports());
+        assert_eq!(deployer1_account.data().len(), 0);
+
+        // transfer lamports DEPLOYER_ADDRESS1 -> DEPLOYER_ADDRESS2
+
+        let deployer1_lamports_to_send = deployer1_lamports_to_send - 1;
+        // deployer1_lamports -= deployer1_lamports_to_send;
+        let deployer2_lamports = deployer1_lamports_to_send;
+        let test_command_data = Transfer {
+            lamports: deployer1_lamports_to_send,
+            seeds: vec![seed1.to_vec()],
+        };
+        let test_command: TestCommand = test_command_data.clone().into();
+        let instruction_data = serialize(&test_command).unwrap();
+        println!(
+            "instruction_data ({}): {:x?}",
+            instruction_data.len(),
+            &instruction_data
+        );
+        let instructions = vec![Instruction::new_with_bincode(
+            pk_contract.clone(),
+            &instruction_data,
+            vec![
+                AccountMeta::new(pk_deployer1, true),
+                AccountMeta::new(pk_deployer2, false),
+                AccountMeta::new(system_program_id, false),
+            ],
+        )];
+        let message = Message::new(&instructions, None);
+        let mut batch_message = BatchMessage::new(None);
+        batch_message.clear().append_one(message);
+        let input = serialize(&batch_message).unwrap();
+        let result = ctx.call_evm_tx_simple(
+            DEPLOYER_ADDRESS1,
+            contract_address,
+            input.clone().into(),
+            None,
+            Some(evm_balance_from_lamports(deployer1_lamports)),
+        );
+        assert!(result.is_success());
+
+        ctx.commit_db_to_sdk();
+
+        let deployer2_account = storage_read_account_data(&ctx.sdk, &pk_deployer2)
+            .expect(format!("failed to read new account data: {}", pk_deployer2).as_str());
+        assert_eq!(deployer2_lamports, deployer2_account.lamports());
+        assert_eq!(deployer2_account.data().len(), 0);
+
+        let deployer1_account = storage_read_account_data(&ctx.sdk, &pk_deployer1)
+            .expect("failed to read payer account data");
+        assert_eq!(0, deployer1_account.lamports());
+        assert_eq!(deployer1_account.data().len(), 0);
+
+        // transfer lamports DEPLOYER_ADDRESS2 -> DEPLOYER_ADDRESS1
+
+        let deployer2_lamports_to_send = deployer1_lamports_to_send - 1;
+        // deployer1_lamports += deployer2_lamports_to_send;
+        let test_command_data = Transfer {
+            lamports: deployer2_lamports_to_send,
+            seeds: vec![seed1.to_vec()],
+        };
+        let test_command: TestCommand = test_command_data.clone().into();
+        let instruction_data = serialize(&test_command).unwrap();
+        println!(
+            "instruction_data ({}): {:x?}",
+            instruction_data.len(),
+            &instruction_data
+        );
+        let instructions = vec![Instruction::new_with_bincode(
+            pk_contract.clone(),
+            &instruction_data,
+            vec![
+                AccountMeta::new(pk_deployer2, true),
+                AccountMeta::new(pk_deployer1, false),
+                AccountMeta::new(system_program_id, false),
+            ],
+        )];
+        let message = Message::new(&instructions, None);
+        let mut batch_message = BatchMessage::new(None);
+        batch_message.clear().append_one(message);
+        let input = serialize(&batch_message).unwrap();
+        let result = ctx.call_evm_tx_simple(
+            DEPLOYER_ADDRESS2,
+            contract_address,
+            input.clone().into(),
+            None,
+            None,
+        );
+        assert!(result.is_success());
+
+        ctx.commit_db_to_sdk();
+
+        let deployer1_account = storage_read_account_data(&ctx.sdk, &pk_deployer1)
+            .expect("failed to read payer account data");
+        assert_eq!(3, deployer1_account.lamports());
+        assert_eq!(deployer1_account.data().len(), 0);
+
+        let deployer2_account = storage_read_account_data(&ctx.sdk, &pk_deployer2)
+            .expect(format!("failed to read new account data: {}", pk_deployer2).as_str());
+        assert_eq!(0, deployer2_account.lamports());
+        assert_eq!(deployer2_account.data().len(), 0);
+    }
+
+    #[test]
+    fn test_svm_deploy_exec_cross_call_evm_sha256() {
+        let mut ctx = EvmTestingContext::default().with_full_genesis();
+        let loader_id = loader_v4::id();
+        let system_program_id = system_program::id();
+        let account_with_program = load_program_account_from_elf_file(
+            &loader_id,
+            "../examples/svm/assets/solana_program_state_usage.so",
+        );
+        let payer_initial_lamports = 101;
+        let seed1 = b"seed";
+
+        let (pk_deployer1, pk_contract, _pk_new, contract_address) = svm_deploy(
+            &mut ctx,
+            &account_with_program,
+            seed1,
+            payer_initial_lamports,
+        );
+
+        ctx.commit_db_to_sdk();
+
+        // exec
+
+        let deployer1_lamports = 0;
+
+        let address = PRECOMPILE_SHA256;
+        let value: U256 = U256::from(0);
+        let gas_limit: u64 = u64::MAX;
+        let call_data: Vec<u8> = vec![1, 2, 3];
+        let call_data_sha256_vec = sha2::Sha256::digest(call_data.as_slice()).to_vec();
+        let test_command_data = EvmCall {
+            address: address.0 .0,
+            value: value.to_le_bytes(),
+            gas_limit,
+            data: call_data,
+            result_data_expected: call_data_sha256_vec,
+        };
+        let test_command: TestCommand = test_command_data.clone().into();
+        let instruction_data = serialize(&test_command).unwrap();
+        println!(
+            "instruction_data ({}): {:x?}",
+            instruction_data.len(),
+            &instruction_data
+        );
+
+        let instructions = vec![Instruction::new_with_bincode(
+            pk_contract.clone(),
+            &instruction_data,
+            vec![
+                AccountMeta::new(pk_deployer1, true),
+                AccountMeta::new(system_program_id, false),
+            ],
+        )];
+        let message = Message::new(&instructions, None);
+        let mut batch_message = BatchMessage::new(None);
+        batch_message.clear().append_one(message);
+        let input = serialize(&batch_message).unwrap();
+        let deployer1_balance_before = ctx.get_balance(DEPLOYER_ADDRESS1);
+        let result = ctx.call_evm_tx_simple(
+            DEPLOYER_ADDRESS1,
+            contract_address,
+            input.clone().into(),
+            None,
+            None,
+        );
+        let deployer1_balance_after = ctx.get_balance(DEPLOYER_ADDRESS1);
+        let deployer1_balance_spent = deployer1_balance_before - deployer1_balance_after;
+        assert_eq!(U256::from(27320), deployer1_balance_spent);
+        let output = result.output().unwrap();
+        if output.len() > 0 {
+            let out_text = from_utf8(output).unwrap();
+            println!("output.len {} output '{}'", output.len(), out_text);
+        }
+        assert!(result.is_success());
+
+        ctx.commit_db_to_sdk();
+
+        let output = result.output().unwrap_or_default();
+        let expected_output = hex!("");
+        assert_eq!(hex::encode(expected_output), hex::encode(output));
+
+        let contract_account = storage_read_account_data(&ctx.sdk, &pk_contract)
+            .expect(format!("failed to read exec account data: {}", pk_contract).as_str());
+        assert_eq!(contract_account.lamports(), 0);
+        assert_eq!(
+            contract_account.data().len(),
+            LoaderV4State::program_data_offset() + account_with_program.data().len()
+        );
+        assert_eq!(
+            &contract_account.data()[LoaderV4State::program_data_offset()..],
+            account_with_program.data()
+        );
+
+        let deployer1_account = storage_read_account_data(&ctx.sdk, &pk_deployer1)
+            .expect("failed to read payer account data");
+        assert_eq!(deployer1_lamports, deployer1_account.lamports());
+        assert_eq!(deployer1_account.data().len(), 0);
+    }
+
+    #[ignore]
+    #[test]
+    fn test_svm_deploy_exec_cross_call_token2022() {
+        let mut ctx = EvmTestingContext::default().with_full_genesis();
+        let loader_id = loader_v4::id();
+        let system_program_id = system_program::id();
+        let account_with_program = load_program_account_from_elf_file(
+            &loader_id,
+            "../examples/svm/assets/solana_program_state_usage.so",
+        );
+        let deployer1_initial_lamports = 101;
+        let seed1 = b"seed";
+
+        let (pk_deployer1, pk_contract, _pk_new, contract_address) = svm_deploy(
+            &mut ctx,
+            &account_with_program,
+            seed1,
+            deployer1_initial_lamports,
+        );
+
+        ctx.commit_db_to_sdk();
+
+        // exec
+
+        let deployer1_lamports = 0;
+
+        // let address = PRECOMPILE_ERC20_RUNTIME;
+        // let value: U256 = U256::from(0);
+        // let gas_limit: u64 = u64::MAX;
+        let call_data: Vec<u8> = vec![1, 2, 3, 4];
+        let call_data_sha256_vec = sha2::Sha256::digest(call_data.as_slice()).to_vec();
+        let test_command_data = Invoke {
+            pubkey: token_2022::lib::id().to_bytes(),
+            data: call_data,
+            account_info_idxs: vec![],
+            account_metas: vec![],
+            result_data_expected: call_data_sha256_vec,
+        };
+        let test_command: TestCommand = test_command_data.clone().into();
+        let instruction_data = serialize(&test_command).unwrap();
+        println!(
+            "instruction_data ({}): {:x?}",
+            instruction_data.len(),
+            &instruction_data
+        );
+
+        storage_write_metadata(&mut ctx.sdk, &token_2022::lib::id(), vec![1, 2, 3].into()).unwrap();
+
+        let instructions = vec![Instruction::new_with_bincode(
+            pk_contract.clone(),
+            &instruction_data,
+            vec![
+                AccountMeta::new(pk_deployer1, true),
+                AccountMeta::new(system_program_id, false),
+            ],
+        )];
+        let message = Message::new(&instructions, None);
+        let mut batch_message = BatchMessage::new(None);
+        batch_message.clear().append_one(message);
+        let input = serialize(&batch_message).unwrap();
+        let result = ctx.call_evm_tx_simple(
+            DEPLOYER_ADDRESS1,
+            contract_address,
+            input.clone().into(),
+            None,
+            None,
+        );
+        let output = result.output().unwrap();
+        if output.len() > 0 {
+            let out_text = from_utf8(output).unwrap();
+            println!("output.len {} output '{}'", output.len(), out_text);
+        }
+        assert!(result.is_success());
+
+        ctx.commit_db_to_sdk();
+
+        let output = result.output().unwrap_or_default();
+        let expected_output = hex!("");
+        assert_eq!(hex::encode(expected_output), hex::encode(output));
+
+        let contract_account = storage_read_account_data(&ctx.sdk, &pk_contract)
+            .expect(format!("failed to read exec account data: {}", pk_contract).as_str());
+        assert_eq!(contract_account.lamports(), 0);
+        assert_eq!(
+            contract_account.data().len(),
+            LoaderV4State::program_data_offset() + account_with_program.data().len()
+        );
+        assert_eq!(
+            &contract_account.data()[LoaderV4State::program_data_offset()..],
+            account_with_program.data()
+        );
+
+        let deployer1_account = storage_read_account_data(&ctx.sdk, &pk_deployer1)
+            .expect("failed to read payer account data");
+        assert_eq!(deployer1_lamports, deployer1_account.lamports());
+        assert_eq!(deployer1_account.data().len(), 0);
     }
 
     #[test]
@@ -316,8 +693,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -327,80 +703,79 @@ mod tests {
 
         // exec
 
-        let test_commands: &[TestCommand] = &[
-            SolBigModExp::from_hex(
-                "1111111111111111111111111111111111111111111111111111111111111111",
-                "1111111111111111111111111111111111111111111111111111111111111111",
-                "111111111111111111111111111111111111111111111111111111111111110A",
-                "0A7074864588D6847F33A168209E516F60005A0CEC3F33AAF70E8002FE964BCD",
-                0,
-            )
-            .into(),
-            SolBigModExp::from_hex(
-                "2222222222222222222222222222222222222222222222222222222222222222",
-                "2222222222222222222222222222222222222222222222222222222222222222",
-                "1111111111111111111111111111111111111111111111111111111111111111",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                0,
-            )
-            .into(),
-            SolBigModExp::from_hex(
-                "3333333333333333333333333333333333333333333333333333333333333333",
-                "3333333333333333333333333333333333333333333333333333333333333333",
-                "2222222222222222222222222222222222222222222222222222222222222222",
-                "1111111111111111111111111111111111111111111111111111111111111111",
-                0,
-            )
-            .into(),
-            SolBigModExp::from_hex(
-                "9874231472317432847923174392874918237439287492374932871937289719",
-                "0948403985401232889438579475812347232099080051356165126166266222",
-                "25532321a214321423124212222224222b242222222222222222222222222444",
-                "220ECE1C42624E98AEE7EB86578B2FE5C4855DFFACCB43CCBB708A3AB37F184D",
-                0,
-            )
-            .into(),
-            SolBigModExp::from_hex(
-                "3494396663463663636363662632666565656456646566786786676786768766",
-                "2324324333246536456354655645656616169896565698987033121934984955",
-                "0218305479243590485092843590249879879842313131156656565565656566",
-                "012F2865E8B9E79B645FCE3A9E04156483AE1F9833F6BFCF86FCA38FC2D5BEF0",
-                0,
-            )
-            .into(),
-            SolBigModExp::from_hex(
-                "0000000000000000000000000000000000000000000000000000000000000005",
-                "0000000000000000000000000000000000000000000000000000000000000002",
-                "0000000000000000000000000000000000000000000000000000000000000007",
-                "0000000000000000000000000000000000000000000000000000000000000004",
-                0,
-            )
-            .into(),
-            SolBigModExp::from_hex(
-                "0000000000000000000000000000000000000000000000000000000000000019",
-                "0000000000000000000000000000000000000000000000000000000000000019",
-                "0000000000000000000000000000000000000000000000000000000000000064",
-                "0000000000000000000000000000000000000000000000000000000000000019",
-                0,
-            )
-            .into(),
-            SolBigModExp::from_hex(
-                "0000000000000000000000000000000000000000000000000000000000000019",
-                "0000000000000000000000000000000000000000000000000000000000000019",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                0,
-            )
-            .into(),
-            SolBigModExp::from_hex(
-                "0000000000000000000000000000000000000000000000000000000000000019",
-                "0000000000000000000000000000000000000000000000000000000000000019",
-                "0000000000000000000000000000000000000000000000000000000000000001",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                0,
-            )
-            .into(),
-        ];
+        let mut test_commands: Vec<TestCommand> = Default::default();
+        let test_case = SolBigModExp::from_hex(
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "111111111111111111111111111111111111111111111111111111111111110A",
+            "0A7074864588D6847F33A168209E516F60005A0CEC3F33AAF70E8002FE964BCD",
+            0,
+        );
+        test_commands.push(test_case.into());
+        let test_case = SolBigModExp::from_hex(
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            0,
+        );
+        test_commands.push(test_case.into());
+        let test_case = SolBigModExp::from_hex(
+            "3333333333333333333333333333333333333333333333333333333333333333",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            0,
+        );
+        test_commands.push(test_case.into());
+        let test_case = SolBigModExp::from_hex(
+            "9874231472317432847923174392874918237439287492374932871937289719",
+            "0948403985401232889438579475812347232099080051356165126166266222",
+            "25532321a214321423124212222224222b242222222222222222222222222444",
+            "220ECE1C42624E98AEE7EB86578B2FE5C4855DFFACCB43CCBB708A3AB37F184D",
+            0,
+        );
+        test_commands.push(test_case.into());
+        let test_case = SolBigModExp::from_hex(
+            "3494396663463663636363662632666565656456646566786786676786768766",
+            "2324324333246536456354655645656616169896565698987033121934984955",
+            "0218305479243590485092843590249879879842313131156656565565656566",
+            "012F2865E8B9E79B645FCE3A9E04156483AE1F9833F6BFCF86FCA38FC2D5BEF0",
+            0,
+        );
+        test_commands.push(test_case.into());
+        let test_case = SolBigModExp::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000005",
+            "0000000000000000000000000000000000000000000000000000000000000002",
+            "0000000000000000000000000000000000000000000000000000000000000007",
+            "0000000000000000000000000000000000000000000000000000000000000004",
+            0,
+        );
+        test_commands.push(test_case.into());
+        let test_case = SolBigModExp::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000019",
+            "0000000000000000000000000000000000000000000000000000000000000019",
+            "0000000000000000000000000000000000000000000000000000000000000064",
+            "0000000000000000000000000000000000000000000000000000000000000019",
+            0,
+        );
+        test_commands.push(test_case.into());
+        let test_case = SolBigModExp::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000019",
+            "0000000000000000000000000000000000000000000000000000000000000019",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            0,
+        );
+        test_commands.push(test_case.into());
+        let test_case = SolBigModExp::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000019",
+            "0000000000000000000000000000000000000000000000000000000000000019",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            0,
+        );
+        test_commands.push(test_case.into());
 
         process_test_commands(
             &mut ctx,
@@ -420,8 +795,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -431,7 +805,9 @@ mod tests {
 
         // exec
 
-        let test_commands: &[TestCommand] = &[SolSecp256k1Recover {
+        let mut test_commands: Vec<TestCommand> = vec![];
+
+        let test_case = SolSecp256k1Recover {
             message: b"hello world".to_vec(),
             signature_bytes: vec![
                 0x93, 0x92, 0xC4, 0x6C, 0x42, 0xF6, 0x31, 0x73, 0x81, 0xD4, 0xB2, 0x44, 0xE9, 0x2F,
@@ -448,9 +824,16 @@ mod tests {
                 0xD3, 0x0C, 0x0C, 0x42, 0x43, 0xC1, 0xEE, 0xA5, 0x0D, 0xC0, 0x48, 0x62, 0xD3, 0xAE,
                 0xB0, 0x3D, 0xA2, 0x20, 0xAC, 0x11, 0x85, 0xEE,
             ],
-            expected_ret: 0,
-        }
-        .into()];
+            expected_ret: EXPECTED_RET_OK,
+        };
+        let fluent_test_case = SolSecp256k1Recover {
+            message: test_case.message,
+            signature_bytes: test_case.signature_bytes,
+            recovery_id: test_case.recovery_id,
+            pubkey_bytes: test_case.pubkey_bytes,
+            expected_ret: test_case.expected_ret,
+        };
+        test_commands.push(fluent_test_case.into());
 
         process_test_commands(
             &mut ctx,
@@ -470,8 +853,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -486,7 +868,7 @@ mod tests {
             expected_result: hex!(
                 "13a08e3cd39a1bc7bf9103f63f83273cced2beada9f723945176d6b983c65bd2"
             ),
-            expected_ret: 0,
+            expected_ret: EXPECTED_RET_OK,
         }
         .into()];
 
@@ -508,8 +890,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -519,14 +900,15 @@ mod tests {
 
         // exec
 
-        let test_commands: &[TestCommand] = &[Sha256 {
+        let mut test_commands: Vec<TestCommand> = vec![];
+        let test_case = Sha256 {
             data: vec![vec![1u8, 2, 3], vec![4, 5, 6]],
             expected_result: hex!(
                 "7192385c3c0605de55bb9476ce1d90748190ecb32a8eed7f5207b30cf6a1fe89"
             ),
-            expected_ret: 0,
-        }
-        .into()];
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
 
         process_test_commands(
             &mut ctx,
@@ -546,8 +928,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -562,7 +943,7 @@ mod tests {
             expected_result: hex!(
                 "828a8660ae86b86f1ebf951a6f84349520cc1501fb6fcf95b05df01200be9fa2"
             ),
-            expected_ret: 0,
+            expected_ret: EXPECTED_RET_OK,
         }
         .into()];
 
@@ -578,14 +959,13 @@ mod tests {
     }
 
     #[test]
-    fn test_svm_sol_poseidon__input_ones_be() {
+    fn test_svm_sol_poseidon_input_ones_be() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -611,7 +991,7 @@ mod tests {
             endianness: Endianness::BigEndian.into(),
             data: vec![input.to_vec()],
             expected_result: hash.to_bytes(),
-            expected_ret: 0,
+            expected_ret: EXPECTED_RET_OK,
         }
         .into()];
 
@@ -627,14 +1007,13 @@ mod tests {
     }
 
     #[test]
-    fn test_svm_sol_poseidon__input_ones_le() {
+    fn test_svm_sol_poseidon_input_ones_le() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -660,7 +1039,7 @@ mod tests {
             endianness: Endianness::LittleEndian.into(),
             data: vec![input.to_vec()],
             expected_result: hash.to_bytes(),
-            expected_ret: 0,
+            expected_ret: EXPECTED_RET_OK,
         }
         .into()];
 
@@ -676,14 +1055,13 @@ mod tests {
     }
 
     #[test]
-    fn test_svm_sol_poseidon__input_ones_twos_be() {
+    fn test_svm_sol_poseidon_input_ones_twos_be() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -714,7 +1092,7 @@ mod tests {
             endianness: Endianness::BigEndian.into(),
             data: vec![input1.to_vec(), input2.to_vec()],
             expected_result: hash.to_bytes(),
-            expected_ret: 0,
+            expected_ret: EXPECTED_RET_OK,
         }
         .into()];
 
@@ -730,14 +1108,13 @@ mod tests {
     }
 
     #[test]
-    fn test_svm_sol_poseidon__input_ones_twos_le() {
+    fn test_svm_sol_poseidon_input_ones_twos_le() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -768,7 +1145,7 @@ mod tests {
             endianness: Endianness::LittleEndian.into(),
             data: vec![input1.to_vec(), input2.to_vec()],
             expected_result: hash.to_bytes(),
-            expected_ret: 0,
+            expected_ret: EXPECTED_RET_OK,
         }
         .into()];
 
@@ -784,14 +1161,13 @@ mod tests {
     }
 
     #[test]
-    fn test_svm_sol_poseidon__input_one() {
+    fn test_svm_sol_poseidon_input_one() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -874,7 +1250,24 @@ mod tests {
                     endianness: Endianness::BigEndian.into(),
                     data: inputs.iter().map(|v| v.to_vec()).collect(),
                     expected_result: hash.to_bytes(),
-                    expected_ret: 0,
+                    expected_ret: EXPECTED_RET_OK,
+                }
+                .into(),
+            );
+            test_commands.push(
+                Poseidon {
+                    parameters: Parameters::Bn254X5.into(),
+                    endianness: Endianness::BigEndian.into(),
+                    data: inputs
+                        .iter()
+                        .map(|v| {
+                            let mut v = v.to_vec();
+                            v.push(0xa);
+                            v
+                        })
+                        .collect(),
+                    expected_result: hash.to_bytes(),
+                    expected_ret: EXPECTED_RET_ERR,
                 }
                 .into(),
             );
@@ -898,8 +1291,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -932,8 +1324,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -943,38 +1334,37 @@ mod tests {
 
         // exec
 
-        let test_commands: &[TestCommand] = &[
-            CurvePointValidation {
-                curve_id: 0,
-                point: ED25519_BASEPOINT_POINT.compress().as_bytes().clone(),
-                expected_ret: 0, // OK
-            }
-            .into(),
-            CurvePointValidation {
-                curve_id: 0,
-                point: [
-                    120, 140, 152, 233, 41, 227, 203, 27, 87, 115, 25, 251, 219, 5, 84, 148, 117,
-                    38, 84, 60, 87, 144, 161, 146, 42, 34, 91, 155, 158, 189, 121, 79,
-                ],
-                expected_ret: 1, // ERR
-            }
-            .into(),
-            CurvePointValidation {
-                curve_id: 0,
-                point: RISTRETTO_BASEPOINT_POINT.compress().as_bytes().clone(),
-                expected_ret: 0, // OK
-            }
-            .into(),
-            CurvePointValidation {
-                curve_id: 0,
-                point: [
-                    120, 140, 152, 233, 41, 227, 203, 27, 87, 115, 25, 251, 219, 5, 84, 148, 117,
-                    38, 84, 60, 87, 144, 161, 146, 42, 34, 91, 155, 158, 189, 121, 79,
-                ],
-                expected_ret: 1, // ERR
-            }
-            .into(),
-        ];
+        let mut test_commands: Vec<TestCommand> = Default::default();
+        let test_case = CurvePointValidation {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            point: ED25519_BASEPOINT_POINT.compress().as_bytes().clone(),
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+        let test_case = CurvePointValidation {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            point: [
+                120, 140, 152, 233, 41, 227, 203, 27, 87, 115, 25, 251, 219, 5, 84, 148, 117, 38,
+                84, 60, 87, 144, 161, 146, 42, 34, 91, 155, 158, 189, 121, 79,
+            ],
+            expected_ret: EXPECTED_RET_ERR,
+        };
+        test_commands.push(test_case.into());
+        let test_case = CurvePointValidation {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            point: RISTRETTO_BASEPOINT_POINT.compress().as_bytes().clone(),
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+        let test_case = CurvePointValidation {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            point: [
+                120, 140, 152, 233, 41, 227, 203, 27, 87, 115, 25, 251, 219, 5, 84, 148, 117, 38,
+                84, 60, 87, 144, 161, 146, 42, 34, 91, 155, 158, 189, 121, 79,
+            ],
+            expected_ret: EXPECTED_RET_ERR,
+        };
+        test_commands.push(test_case.into());
 
         process_test_commands(
             &mut ctx,
@@ -994,8 +1384,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -1008,6 +1397,7 @@ mod tests {
         let mut test_commands: Vec<TestCommand> = vec![];
 
         // identity cases
+        use curve25519_dalek::traits::Identity;
         let identity = PodEdwardsPoint(EdwardsPoint::identity().compress().to_bytes());
         let point = PodEdwardsPoint([
             201, 179, 241, 122, 180, 185, 239, 50, 183, 52, 221, 0, 153, 195, 43, 18, 22, 38, 187,
@@ -1015,28 +1405,47 @@ mod tests {
         ]);
         assert_eq!(add_edwards(&point, &identity).unwrap(), point);
         assert_eq!(subtract_edwards(&point, &identity).unwrap(), point);
-        test_commands.push(
-            CurveGroupOp {
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::ADD,
-                left_input: point.0,
-                right_input: identity.0,
-                expected_point: point.0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
-        test_commands.push(
-            CurveGroupOp {
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::SUB,
-                left_input: point.0,
-                right_input: identity.0,
-                expected_point: point.0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: point.0,
+            right_input: identity.0,
+            expected_point: point.0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::SUB,
+            left_input: point.0,
+            right_input: identity.0,
+            expected_point: point.0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        let scalar: [u8; 32] = [
+            254, 198, 23, 138, 67, 243, 184, 110, 236, 115, 236, 205, 205, 215, 79, 114, 45, 250,
+            78, 137, 3, 107, 136, 237, 49, 126, 117, 223, 37, 191, 88, 6,
+        ];
+        let right_point: [u8; 32] = [
+            70, 222, 137, 221, 253, 204, 71, 51, 78, 8, 124, 1, 67, 200, 102, 225, 122, 228, 111,
+            183, 129, 14, 131, 210, 212, 95, 109, 246, 55, 10, 159, 91,
+        ];
+        let expected_point: [u8; 32] = [
+            64, 150, 40, 55, 80, 49, 217, 209, 105, 229, 181, 65, 241, 68, 2, 106, 220, 234, 211,
+            71, 159, 76, 156, 114, 242, 68, 147, 31, 243, 211, 191, 124,
+        ];
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::MUL,
+            left_input: scalar,
+            right_input: right_point,
+            expected_point,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
 
         // associativity cases
         let point_a = PodEdwardsPoint([
@@ -1055,118 +1464,240 @@ mod tests {
             add_edwards(&add_edwards(&point_a, &point_b).unwrap(), &point_c),
             add_edwards(&point_a, &add_edwards(&point_b, &point_c).unwrap()),
         );
-        test_commands.push(
-            CurveGroupOp {
-                // a + b
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::ADD,
-                left_input: point_a.0,
-                right_input: point_b.0,
-                expected_point: add_edwards(&point_a, &point_b).unwrap().0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
-        test_commands.push(
-            CurveGroupOp {
-                // (a + b) + c
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::ADD,
-                left_input: add_edwards(&point_a, &point_b).unwrap().0,
-                right_input: point_c.0,
-                expected_point: add_edwards(&add_edwards(&point_a, &point_b).unwrap(), &point_c)
-                    .unwrap()
-                    .0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
-        test_commands.push(
-            CurveGroupOp {
-                // b + c
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::ADD,
-                left_input: point_b.0,
-                right_input: point_c.0,
-                expected_point: add_edwards(&point_b, &point_c).unwrap().0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
-        test_commands.push(
-            CurveGroupOp {
-                // a + (b + c)
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::ADD,
-                left_input: point_a.0,
-                right_input: add_edwards(&point_b, &point_c).unwrap().0,
-                expected_point: add_edwards(&point_a, &add_edwards(&point_b, &point_c).unwrap())
-                    .unwrap()
-                    .0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
-        test_commands.push(
-            CurveGroupOp {
-                // (a + b) + c = a + (b + c)
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::ADD,
-                left_input: add_edwards(&point_a, &point_b).unwrap().0,
-                right_input: point_c.0,
-                expected_point: add_edwards(&point_a, &add_edwards(&point_b, &point_c).unwrap())
-                    .unwrap()
-                    .0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
+        let test_case = CurveGroupOp {
+            // a + b
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: point_a.0,
+            right_input: point_b.0,
+            expected_point: add_edwards(&point_a, &point_b).unwrap().0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+        let test_case = CurveGroupOp {
+            // (a + b) + c
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: add_edwards(&point_a, &point_b).unwrap().0,
+            right_input: point_c.0,
+            expected_point: add_edwards(&add_edwards(&point_a, &point_b).unwrap(), &point_c)
+                .unwrap()
+                .0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        let test_case = CurveGroupOp {
+            // b + c
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: point_b.0,
+            right_input: point_c.0,
+            expected_point: add_edwards(&point_b, &point_c).unwrap().0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        let test_case = CurveGroupOp {
+            // a + (b + c)
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: point_a.0,
+            right_input: add_edwards(&point_b, &point_c).unwrap().0,
+            expected_point: add_edwards(&point_a, &add_edwards(&point_b, &point_c).unwrap())
+                .unwrap()
+                .0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        let test_case = CurveGroupOp {
+            // (a + b) + c = a + (b + c)
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: add_edwards(&point_a, &point_b).unwrap().0,
+            right_input: point_c.0,
+            expected_point: add_edwards(&point_a, &add_edwards(&point_b, &point_c).unwrap())
+                .unwrap()
+                .0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
 
         // commutativity
         assert_eq!(
             add_edwards(&point_a, &point_b).unwrap(),
             add_edwards(&point_b, &point_a).unwrap(),
         );
-        test_commands.push(
-            CurveGroupOp {
-                // a + b = b + a
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::ADD,
-                left_input: point_a.0,
-                right_input: point_b.0,
-                expected_point: add_edwards(&point_b, &point_a).unwrap().0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
-        test_commands.push(
-            CurveGroupOp {
-                // b + a = a + b
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::ADD,
-                left_input: point_b.0,
-                right_input: point_a.0,
-                expected_point: add_edwards(&point_a, &point_b).unwrap().0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
+        let test_case = CurveGroupOp {
+            // a + b = b + a
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: point_a.0,
+            right_input: point_b.0,
+            expected_point: add_edwards(&point_b, &point_a).unwrap().0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+        let test_case = CurveGroupOp {
+            // b + a = a + b
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: point_b.0,
+            right_input: point_a.0,
+            expected_point: add_edwards(&point_a, &point_b).unwrap().0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
 
         // subtraction
         let point = PodEdwardsPoint(ED25519_BASEPOINT_POINT.compress().to_bytes());
         let point_negated = PodEdwardsPoint((-ED25519_BASEPOINT_POINT).compress().to_bytes());
         assert_eq!(point_negated, subtract_edwards(&identity, &point).unwrap(),);
-        test_commands.push(
-            CurveGroupOp {
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                group_op: solana_curve25519::curve_syscall_traits::SUB,
-                left_input: identity.0,
-                right_input: point.0,
-                expected_point: point_negated.0,
-                expected_ret: 0, // OK
-            }
-            .into(),
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            group_op: solana_curve25519::curve_syscall_traits::SUB,
+            left_input: identity.0,
+            right_input: point.0,
+            expected_point: point_negated.0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        // RISTRETTO
+        // identity
+        let identity = PodRistrettoPoint(RistrettoPoint::identity().compress().to_bytes());
+        let point = PodRistrettoPoint([
+            210, 174, 124, 127, 67, 77, 11, 114, 71, 63, 168, 136, 113, 20, 141, 228, 195, 254,
+            232, 229, 220, 249, 213, 232, 61, 238, 152, 249, 83, 225, 206, 16,
+        ]);
+        assert_eq!(add_ristretto(&point, &identity).unwrap(), point);
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: point.0,
+            right_input: identity.0,
+            expected_point: add_ristretto(&point, &identity).unwrap().0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+        assert_eq!(subtract_ristretto(&point, &identity).unwrap(), point);
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            group_op: solana_curve25519::curve_syscall_traits::SUB,
+            left_input: point.0,
+            right_input: identity.0,
+            expected_point: subtract_ristretto(&point, &identity).unwrap().0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        // associativity
+        let point_a = PodRistrettoPoint([
+            208, 165, 125, 204, 2, 100, 218, 17, 170, 194, 23, 9, 102, 156, 134, 136, 217, 190, 98,
+            34, 183, 194, 228, 153, 92, 11, 108, 103, 28, 57, 88, 15,
+        ]);
+        let point_b = PodRistrettoPoint([
+            208, 241, 72, 163, 73, 53, 32, 174, 54, 194, 71, 8, 70, 181, 244, 199, 93, 147, 99,
+            231, 162, 127, 25, 40, 39, 19, 140, 132, 112, 212, 145, 108,
+        ]);
+        let point_c = PodRistrettoPoint([
+            250, 61, 200, 25, 195, 15, 144, 179, 24, 17, 252, 167, 247, 44, 47, 41, 104, 237, 49,
+            137, 231, 173, 86, 106, 121, 249, 245, 247, 70, 188, 31, 49,
+        ]);
+        assert_eq!(
+            add_ristretto(&add_ristretto(&point_a, &point_b).unwrap(), &point_c),
+            add_ristretto(&point_a, &add_ristretto(&point_b, &point_c).unwrap()),
         );
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: add_ristretto(&point_a, &point_b).unwrap().0,
+            right_input: point_c.0,
+            expected_point: add_ristretto(&point_a, &add_ristretto(&point_b, &point_c).unwrap())
+                .unwrap()
+                .0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+        assert_eq!(
+            subtract_ristretto(&subtract_ristretto(&point_a, &point_b).unwrap(), &point_c),
+            subtract_ristretto(&point_a, &add_ristretto(&point_b, &point_c).unwrap()),
+        );
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            group_op: solana_curve25519::curve_syscall_traits::SUB,
+            left_input: subtract_ristretto(&point_a, &point_b).unwrap().0,
+            right_input: point_c.0,
+            expected_point: subtract_ristretto(
+                &point_a,
+                &add_ristretto(&point_b, &point_c).unwrap(),
+            )
+            .unwrap()
+            .0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        // commutativity
+        assert_eq!(
+            add_ristretto(&point_a, &point_b).unwrap(),
+            add_ristretto(&point_b, &point_a).unwrap(),
+        );
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            group_op: solana_curve25519::curve_syscall_traits::ADD,
+            left_input: point_a.0,
+            right_input: point_b.0,
+            expected_point: add_ristretto(&point_b, &point_a).unwrap().0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        // subtraction
+        let point = PodRistrettoPoint(RISTRETTO_BASEPOINT_POINT.compress().to_bytes());
+        let point_negated = PodRistrettoPoint((-RISTRETTO_BASEPOINT_POINT).compress().to_bytes());
+        assert_eq!(
+            point_negated,
+            subtract_ristretto(&identity, &point).unwrap(),
+        );
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            group_op: solana_curve25519::curve_syscall_traits::SUB,
+            left_input: identity.0,
+            right_input: point.0,
+            expected_point: point_negated.0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
+
+        let scalar_x = PodScalar([
+            254, 198, 23, 138, 67, 243, 184, 110, 236, 115, 236, 205, 205, 215, 79, 114, 45, 250,
+            78, 137, 3, 107, 136, 237, 49, 126, 117, 223, 37, 191, 88, 6,
+        ]);
+        let point_a = PodRistrettoPoint([
+            68, 80, 232, 181, 241, 77, 60, 81, 154, 51, 173, 35, 98, 234, 149, 37, 1, 39, 191, 201,
+            193, 48, 88, 189, 97, 126, 63, 35, 144, 145, 203, 31,
+        ]);
+        let point_b = PodRistrettoPoint([
+            200, 236, 1, 12, 244, 130, 226, 214, 28, 125, 43, 163, 222, 234, 81, 213, 201, 156, 31,
+            4, 167, 132, 240, 76, 164, 18, 45, 20, 48, 85, 206, 121,
+        ]);
+        let ax = multiply_ristretto(&scalar_x, &point_a).unwrap();
+        let bx = multiply_ristretto(&scalar_x, &point_b).unwrap();
+        assert_eq!(
+            add_ristretto(&ax, &bx),
+            multiply_ristretto(&scalar_x, &add_ristretto(&point_a, &point_b).unwrap()),
+        );
+        let test_case = CurveGroupOp {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            group_op: solana_curve25519::curve_syscall_traits::MUL,
+            left_input: scalar_x.0,
+            right_input: add_ristretto(&point_a, &point_b).unwrap().0,
+            expected_point: add_ristretto(&ax, &bx).unwrap().0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
 
         process_test_commands(
             &mut ctx,
@@ -1186,8 +1717,7 @@ mod tests {
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -1210,16 +1740,14 @@ mod tests {
         let basic_product = multiply_edwards(&scalar, &point).unwrap();
         let msm_product = multiscalar_multiply_edwards(&[scalar], &[point]).unwrap();
         assert_eq!(basic_product, msm_product);
-        test_commands.push(
-            CurveMultiscalarMultiplication {
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                scalars: vec![scalar.0],
-                points: vec![point.0],
-                expected_point: basic_product.0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
+        let test_case = CurveMultiscalarMultiplication {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            scalars: vec![scalar.0],
+            points: vec![point.0],
+            expected_point: basic_product.0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+        test_commands.push(test_case.into());
 
         let scalar_a = PodScalar([
             246, 154, 34, 110, 31, 185, 50, 1, 252, 194, 163, 56, 211, 18, 101, 192, 57, 225, 207,
@@ -1243,16 +1771,68 @@ mod tests {
         let msm_product =
             multiscalar_multiply_edwards(&[scalar_a, scalar_b], &[point_x, point_y]).unwrap();
         assert_eq!(basic_product, msm_product);
-        test_commands.push(
-            CurveMultiscalarMultiplication {
-                curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
-                scalars: vec![scalar_a.0, scalar_b.0],
-                points: vec![point_x.0, point_y.0],
-                expected_point: basic_product.0,
-                expected_ret: 0, // OK
-            }
-            .into(),
-        );
+        let test_case = CurveMultiscalarMultiplication {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_EDWARDS,
+            scalars: vec![scalar_a.0, scalar_b.0],
+            points: vec![point_x.0, point_y.0],
+            expected_point: basic_product.0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+
+        test_commands.push(test_case.into());
+
+        let scalar = PodScalar([
+            123, 108, 109, 66, 154, 185, 88, 122, 178, 43, 17, 154, 201, 223, 31, 238, 59, 215, 71,
+            154, 215, 143, 177, 158, 9, 136, 32, 223, 139, 13, 133, 5,
+        ]);
+        let point = PodRistrettoPoint([
+            158, 2, 130, 90, 148, 36, 172, 155, 86, 196, 74, 139, 30, 98, 44, 225, 155, 207, 135,
+            111, 238, 167, 235, 67, 234, 125, 0, 227, 146, 31, 24, 113,
+        ]);
+        let basic_product = multiply_ristretto(&scalar, &point).unwrap();
+        let msm_product = multiscalar_multiply_ristretto(&[scalar], &[point]).unwrap();
+        assert_eq!(basic_product, msm_product);
+        let test_case = CurveMultiscalarMultiplication {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            scalars: vec![scalar.0],
+            points: vec![point.0],
+            expected_point: basic_product.0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+
+        test_commands.push(test_case.into());
+
+        let scalar_a = PodScalar([
+            8, 161, 219, 155, 192, 137, 153, 26, 27, 40, 30, 17, 124, 194, 26, 41, 32, 7, 161, 45,
+            212, 198, 212, 81, 133, 185, 164, 85, 95, 232, 106, 10,
+        ]);
+        let scalar_b = PodScalar([
+            135, 207, 106, 208, 107, 127, 46, 82, 66, 22, 136, 125, 105, 62, 69, 34, 213, 210, 17,
+            196, 120, 114, 238, 237, 149, 170, 5, 243, 54, 77, 172, 12,
+        ]);
+        let point_x = PodRistrettoPoint([
+            130, 35, 97, 25, 18, 199, 33, 239, 85, 143, 119, 111, 49, 51, 224, 40, 167, 185, 240,
+            179, 25, 194, 213, 41, 14, 155, 104, 18, 181, 197, 15, 112,
+        ]);
+        let point_y = PodRistrettoPoint([
+            152, 156, 155, 197, 152, 232, 92, 206, 219, 159, 193, 134, 121, 128, 139, 36, 56, 191,
+            51, 143, 72, 204, 87, 76, 110, 124, 101, 96, 238, 158, 42, 108,
+        ]);
+        let ax = multiply_ristretto(&scalar_a, &point_x).unwrap();
+        let by = multiply_ristretto(&scalar_b, &point_y).unwrap();
+        let basic_product = add_ristretto(&ax, &by).unwrap();
+        let msm_product =
+            multiscalar_multiply_ristretto(&[scalar_a, scalar_b], &[point_x, point_y]).unwrap();
+        assert_eq!(basic_product, msm_product);
+        let test_case = CurveMultiscalarMultiplication {
+            curve_id: solana_curve25519::curve_syscall_traits::CURVE25519_RISTRETTO,
+            scalars: vec![scalar_a.0, scalar_b.0],
+            points: vec![point_x.0, point_y.0],
+            expected_point: basic_product.0,
+            expected_ret: EXPECTED_RET_OK,
+        };
+
+        test_commands.push(test_case.into());
 
         process_test_commands(
             &mut ctx,
@@ -1266,14 +1846,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sol_alt_bn128_group_op__addition() {
+    fn test_sol_alt_bn128_group_op_addition() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -1373,15 +1952,14 @@ mod tests {
 
             assert_eq!(result.unwrap(), expected);
 
-            test_commands.push(
-                SyscallAltBn128 {
-                    group_op: ALT_BN128_ADD,
-                    input: input.clone(),
-                    expected_result: expected,
-                    expected_ret: 0, // OK
-                }
-                .into(),
-            );
+            let test_case = SyscallAltBn128 {
+                group_op: ALT_BN128_ADD,
+                input: input.clone(),
+                expected_result: expected,
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
         });
 
         process_test_commands(
@@ -1396,14 +1974,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sol_alt_bn128_group_op__multiplication() {
+    fn test_sol_alt_bn128_group_op_multiplication() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -1545,15 +2122,14 @@ mod tests {
 
             assert_eq!(result.unwrap(), expected);
 
-            test_commands.push(
-                SyscallAltBn128 {
-                    group_op: ALT_BN128_MUL,
-                    input: input.clone(),
-                    expected_result: expected,
-                    expected_ret: 0, // OK
-                }
-                .into(),
-            );
+            let test_case = SyscallAltBn128 {
+                group_op: ALT_BN128_MUL,
+                input: input.clone(),
+                expected_result: expected,
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
         });
 
         process_test_commands(
@@ -1567,15 +2143,17 @@ mod tests {
         );
     }
 
+    type G1 = ark_bn254::g1::G1Affine;
+    type G2 = ark_bn254::g2::G2Affine;
+
     #[test]
-    fn test_sol_alt_bn128_group_op__pairing() {
+    fn test_sol_alt_bn128_pairing() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -1625,12 +2203,6 @@ mod tests {
             "Gas": 113000,
             "NoBenchmark": false
         },{
-            "Input": "",
-            "Expected": "0000000000000000000000000000000000000000000000000000000000000001",
-            "Name": "empty_data",
-            "Gas": 45000,
-            "NoBenchmark": false
-        },{
             "Input": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa",
             "Expected": "0000000000000000000000000000000000000000000000000000000000000000",
             "Name": "one_point",
@@ -1655,29 +2227,24 @@ mod tests {
             "Gas": 113000,
             "NoBenchmark": false
         },{
+            "Input": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d",
+            "Expected": "0000000000000000000000000000000000000000000000000000000000000001",
+            "Name": "ten_point_match_1",
+            "Gas": 385000,
+            "NoBenchmark": false
+        },{
+            "Input": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa",
+            "Expected": "0000000000000000000000000000000000000000000000000000000000000001",
+            "Name": "ten_point_match_2",
+            "Gas": 385000,
+            "NoBenchmark": false
+        },{
             "Input": "105456a333e6d636854f987ea7bb713dfd0ae8371a72aea313ae0c32c0bf10160cf031d41b41557f3e7e3ba0c51bebe5da8e6ecd855ec50fc87efcdeac168bcc0476be093a6d2b4bbf907172049874af11e1b6267606e00804d3ff0037ec57fd3010c68cb50161b7d1d96bb71edfec9880171954e56871abf3d93cc94d745fa114c059d74e5b6c4ec14ae5864ebe23a71781d86c29fb8fb6cce94f70d3de7a2101b33461f39d9e887dbb100f170a2345dde3c07e256d1dfa2b657ba5cd030427000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000021a2c3013d2ea92e13c800cde68ef56a294b883f6ac35d25f587c09b1b3c635f7290158a80cd3d66530f74dc94c94adb88f5cdb481acca997b6e60071f08a115f2f997f3dbd66a7afe07fe7862ce239edba9e05c5afff7f8a1259c9733b2dfbb929d1691530ca701b4a106054688728c9972c8512e9789e9567aae23e302ccd75",
             "Expected": "0000000000000000000000000000000000000000000000000000000000000001",
             "Name": "ten_point_match_3",
             "Gas": 113000,
             "NoBenchmark": false
         }
-        ]"#;
-
-        // this cases doesnt work because of: memory allocation failed, out of memory
-        let test_data_with_problem = r#"[
-            {
-                "Input": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed275dc4a288d1afb3cbb1ac09187524c7db36395df7be3b99e673b13a075a65ec1d9befcd05a5323e6da4d435f3b617cdb3af83285c2df711ef39c01571827f9d",
-                "Expected": "0000000000000000000000000000000000000000000000000000000000000001",
-                "Name": "ten_point_match_1",
-                "Gas": 385000,
-                "NoBenchmark": false
-            },{
-                "Input": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad7927dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de15204bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd31a76dae6d3272396d0cbe61fced2bc532edac647851e3ac53ce1cc9c7e645a83198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa",
-                "Expected": "0000000000000000000000000000000000000000000000000000000000000001",
-                "Name": "ten_point_match_2",
-                "Gas": 385000,
-                "NoBenchmark": false
-            }
         ]"#;
 
         #[derive(Deserialize)]
@@ -1687,9 +2254,7 @@ mod tests {
             expected: String,
         }
 
-        let mut test_cases: Vec<TestCase> = serde_json::from_str(test_data).unwrap();
-        // let mut test_cases: Vec<TestCase> = vec![];
-        test_cases.append(&mut serde_json::from_str(test_data_with_problem).unwrap());
+        let test_cases: Vec<TestCase> = serde_json::from_str(test_data).unwrap();
 
         test_cases.iter().for_each(|test| {
             let input = array_bytes::hex2bytes_unchecked(&test.input);
@@ -1700,15 +2265,14 @@ mod tests {
 
             assert_eq!(result.unwrap(), expected);
 
-            test_commands.push(
-                SyscallAltBn128 {
-                    group_op: ALT_BN128_PAIRING,
-                    input: input.clone(),
-                    expected_result: expected,
-                    expected_ret: 0, // OK
-                }
-                .into(),
-            );
+            let test_case = SyscallAltBn128 {
+                group_op: ALT_BN128_PAIRING,
+                input: input.clone(),
+                expected_result: expected,
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
         });
 
         process_test_commands(
@@ -1722,18 +2286,14 @@ mod tests {
         );
     }
 
-    type G1 = ark_bn254::g1::G1Affine;
-    type G2 = ark_bn254::g2::G2Affine;
-
     #[test]
-    fn test_sol_alt_bn128_compression__g1_compression() {
+    fn test_sol_alt_bn128_compression_g1_compress_decompress() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -1751,7 +2311,7 @@ mod tests {
             175, 106, 75, 147, 236, 90, 101, 123, 219, 245, 151, 209, 202, 218, 104, 148, 8, 32,
             254, 243, 191, 218, 122, 42, 81, 193, 84,
         ];
-        let g1_le = convert_endianness::<32, 64>(&g1_be);
+        let g1_le = convert_endianness_fixed::<32, 64>(&g1_be);
         let g1: G1 =
             G1::deserialize_with_mode(g1_le.as_slice(), Compress::No, Validate::No).unwrap();
 
@@ -1765,14 +2325,14 @@ mod tests {
             .y
             .serialize_with_mode(&mut g1_neg_be[32..64], Compress::No)
             .unwrap();
-        let g1_neg_be: [u8; 64] = convert_endianness::<32, 64>(&g1_neg_be);
+        let g1_neg_be: [u8; 64] = convert_endianness_fixed::<32, 64>(&g1_neg_be);
 
         let points = [(g1, g1_be), (g1_neg, g1_neg_be)];
 
         for (point, g1_be) in &points {
             let mut compressed_ref = [0u8; 32];
             G1::serialize_with_mode(point, compressed_ref.as_mut_slice(), Compress::Yes).unwrap();
-            let compressed_ref: [u8; 32] = convert_endianness::<32, 32>(&compressed_ref);
+            let compressed_ref: [u8; 32] = convert_endianness_fixed::<32, 32>(&compressed_ref);
 
             let decompressed = alt_bn128_g1_decompress(compressed_ref.as_slice()).unwrap();
 
@@ -1782,23 +2342,46 @@ mod tests {
             );
             assert_eq!(decompressed, *g1_be);
 
-            test_commands.push(
-                AltBn128Compression {
-                    group_op: ALT_BN128_G1_COMPRESS,
-                    input: decompressed.to_vec(),
-                    expected_result: alt_bn128_g1_compress(&decompressed).unwrap().to_vec(),
-                    expected_ret: 0, // OK
-                }
-                .into(),
+            let test_case = AltBn128Compression {
+                group_op: ALT_BN128_G1_COMPRESS,
+                input: decompressed.to_vec(),
+                expected_result: compressed_ref.to_vec(),
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
+            let syscall_decompressed =
+                SyscallWeierstrassCompressDecompressAssign::<ConfigG1Decompress>::fn_impl(
+                    &convert_endianness_fixed::<
+                        BN254_G1_POINT_COMPRESSED_SIZE,
+                        BN254_G1_POINT_COMPRESSED_SIZE,
+                    >(&compressed_ref.try_into().unwrap()),
+                )
+                .unwrap();
+            assert_eq!(
+                decompressed,
+                convert_endianness_fixed::<32, 64>(&syscall_decompressed.try_into().unwrap(),)
             );
-            test_commands.push(
-                AltBn128Compression {
-                    group_op: ALT_BN128_G1_DECOMPRESS,
-                    input: alt_bn128_g1_compress(&decompressed).unwrap().to_vec(),
-                    expected_result: decompressed.to_vec(),
-                    expected_ret: 0, // OK
-                }
-                .into(),
+
+            let test_case = AltBn128Compression {
+                group_op: ALT_BN128_G1_DECOMPRESS,
+                input: compressed_ref.to_vec(),
+                expected_result: decompressed.to_vec(),
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
+            let syscall_compressed =
+                SyscallWeierstrassCompressDecompressAssign::<ConfigG1Compress>::fn_impl(
+                    &convert_endianness_fixed::<
+                        BN254_G1_POINT_COMPRESSED_SIZE,
+                        BN254_G1_POINT_DECOMPRESSED_SIZE,
+                    >(&decompressed.try_into().unwrap()),
+                )
+                .unwrap();
+            assert_eq!(
+                compressed_ref,
+                convert_endianness_fixed::<32, 32>(&syscall_compressed.try_into().unwrap(),)
             );
         }
 
@@ -1814,14 +2397,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sol_alt_bn128_compression__g2_compression() {
+    fn test_sol_alt_bn128_compression_g2_compress_decompress() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -1842,7 +2424,7 @@ mod tests {
             22, 14, 129, 168, 6, 80, 246, 254, 100, 218, 131, 94, 49, 247, 211, 3, 245, 22, 200,
             177, 91, 60, 144, 147, 174, 90, 17, 19, 189, 62, 147, 152, 18,
         ];
-        let g2_le = convert_endianness::<64, 128>(&g2_be);
+        let g2_le = convert_endianness_fixed::<64, 128>(&g2_be);
         let g2: G2 =
             G2::deserialize_with_mode(g2_le.as_slice(), Compress::No, Validate::No).unwrap();
 
@@ -1856,14 +2438,14 @@ mod tests {
             .y
             .serialize_with_mode(&mut g2_neg_be[64..128], Compress::No)
             .unwrap();
-        let g2_neg_be: [u8; 128] = convert_endianness::<64, 128>(&g2_neg_be);
+        let g2_neg_be: [u8; 128] = convert_endianness_fixed::<64, 128>(&g2_neg_be);
 
         let points = [(g2, g2_be), (g2_neg, g2_neg_be)];
 
         for (point, g2_be) in &points {
             let mut compressed_ref = [0u8; 64];
             G2::serialize_with_mode(point, compressed_ref.as_mut_slice(), Compress::Yes).unwrap();
-            let compressed_ref: [u8; 64] = convert_endianness::<64, 64>(&compressed_ref);
+            let compressed_ref: [u8; 64] = convert_endianness_fixed::<64, 64>(&compressed_ref);
 
             let decompressed = alt_bn128_g2_decompress(compressed_ref.as_slice()).unwrap();
 
@@ -1873,23 +2455,46 @@ mod tests {
             );
             assert_eq!(decompressed, *g2_be);
 
-            test_commands.push(
-                AltBn128Compression {
-                    group_op: ALT_BN128_G2_COMPRESS,
-                    input: decompressed.to_vec(),
-                    expected_result: alt_bn128_g2_compress(&decompressed).unwrap().to_vec(),
-                    expected_ret: 0, // OK
-                }
-                .into(),
+            let test_case = AltBn128Compression {
+                group_op: ALT_BN128_G2_COMPRESS,
+                input: decompressed.to_vec(),
+                expected_result: alt_bn128_g2_compress(&decompressed).unwrap().to_vec(),
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
+            let syscall_decompressed =
+                SyscallWeierstrassCompressDecompressAssign::<ConfigG2Decompress>::fn_impl(
+                    &convert_endianness_fixed::<
+                        BN254_G2_POINT_COMPRESSED_SIZE,
+                        BN254_G2_POINT_COMPRESSED_SIZE,
+                    >(&compressed_ref.try_into().unwrap()),
+                )
+                .unwrap();
+            assert_eq!(
+                decompressed,
+                convert_endianness_fixed::<64, 128>(&syscall_decompressed.try_into().unwrap(),)
             );
-            test_commands.push(
-                AltBn128Compression {
-                    group_op: ALT_BN128_G2_DECOMPRESS,
-                    input: alt_bn128_g2_compress(&decompressed).unwrap().to_vec(),
-                    expected_result: decompressed.to_vec(),
-                    expected_ret: 0, // OK
-                }
-                .into(),
+
+            let test_case = AltBn128Compression {
+                group_op: ALT_BN128_G2_DECOMPRESS,
+                input: alt_bn128_g2_compress(&decompressed).unwrap().to_vec(),
+                expected_result: decompressed.to_vec(),
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
+            let syscall_compressed =
+                SyscallWeierstrassCompressDecompressAssign::<ConfigG2Compress>::fn_impl(
+                    &convert_endianness_fixed::<
+                        BN254_G2_POINT_COMPRESSED_SIZE,
+                        BN254_G2_POINT_DECOMPRESSED_SIZE,
+                    >(&decompressed.try_into().unwrap()),
+                )
+                .unwrap();
+            assert_eq!(
+                compressed_ref,
+                convert_endianness_fixed::<64, 64>(&syscall_compressed.try_into().unwrap(),)
             );
         }
 
@@ -1905,14 +2510,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sol_alt_bn128_compression__pairing() {
+    fn test_sol_alt_bn128_compression_pairing() {
         let mut ctx = EvmTestingContext::default().with_full_genesis();
         let loader_id = loader_v4::id();
         let system_program_id = system_program::id();
         let account_with_program = load_program_account_from_elf_file(
             &loader_id,
-            // "../examples/svm/solana-program/assets/solana_program.so",
-            "../contracts/examples/svm/assets/fluentbase_examples_svm_solana_program_state_usage.so",
+            "../examples/svm/assets/solana_program_state_usage.so",
         );
         let payer_lamports = 101;
         let seed1 = b"seed";
@@ -1948,29 +2552,27 @@ mod tests {
             let g1_compressed = alt_bn128_g1_compress(&g1).unwrap();
             assert_eq!(g1, alt_bn128_g1_decompress(&g1_compressed).unwrap());
 
-            test_commands.push(
-                AltBn128Compression {
-                    group_op: ALT_BN128_G1_DECOMPRESS,
-                    input: g1_compressed.to_vec(),
-                    expected_result: g1.to_vec(),
-                    expected_ret: 0,
-                }
-                .into(),
-            );
+            let test_case = AltBn128Compression {
+                group_op: ALT_BN128_G1_DECOMPRESS,
+                input: g1_compressed.to_vec(),
+                expected_result: g1.to_vec(),
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
 
             let g2 = input[64..192].to_vec();
             let g2_compressed = alt_bn128_g2_compress(&g2).unwrap();
             assert_eq!(g2, alt_bn128_g2_decompress(&g2_compressed).unwrap());
 
-            test_commands.push(
-                AltBn128Compression {
-                    group_op: ALT_BN128_G2_DECOMPRESS,
-                    input: g2_compressed.to_vec(),
-                    expected_result: g2.to_vec(),
-                    expected_ret: 0,
-                }
-                .into(),
-            );
+            let test_case = AltBn128Compression {
+                group_op: ALT_BN128_G2_DECOMPRESS,
+                input: g2_compressed.to_vec(),
+                expected_result: g2.to_vec(),
+                expected_ret: EXPECTED_RET_OK,
+            };
+
+            test_commands.push(test_case.into());
         });
 
         process_test_commands(

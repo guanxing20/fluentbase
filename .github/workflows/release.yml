@@ -25,9 +25,7 @@ jobs:
     runs-on: ubuntu-amd64-8core
     needs: extract-version
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify crate version matches tag
         # Check that the Cargo version starts with the tag,
@@ -43,9 +41,7 @@ jobs:
     runs-on: ubuntu-amd64-8core
     needs: extract-version
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
+      - uses: actions/checkout@v5
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
@@ -53,7 +49,7 @@ jobs:
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Build genesis
-        run: cargo b
+        run: cargo b --release
       - name: Move binary
         run: |
           mkdir artifacts
@@ -95,12 +91,9 @@ jobs:
     steps:
       # This is necessary for generating the changelog.
       # It has to come before "Download Artifacts" or else it deletes the artifacts.
-      - uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
-          fetch-depth: 0
+      - uses: actions/checkout@v5
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
       - name: Generate full changelog
         id: changelog
         run: |

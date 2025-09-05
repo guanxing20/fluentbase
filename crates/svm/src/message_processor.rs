@@ -1,11 +1,10 @@
 use crate::{
     account::{ReadableAccount, WritableAccount},
     context::{IndexOfAccount, InstructionAccount, InvokeContext},
-    precompiles::is_precompile,
     solana_program::{message::SanitizedMessage, sysvar::instructions},
 };
 use alloc::vec::Vec;
-use fluentbase_sdk::SharedAPI;
+use fluentbase_sdk::{debug_log_ext, SharedAPI};
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
@@ -19,18 +18,16 @@ impl MessageProcessor {
         message: &SanitizedMessage,
         program_indices: &[Vec<IndexOfAccount>],
         invoke_context: &mut InvokeContext<'_, SDK>,
-    ) -> Result<HashMap<Pubkey, (u64, u64)>, TransactionError> {
+    ) -> Result<(), TransactionError> {
         debug_assert_eq!(program_indices.len(), message.instructions().len());
-        // TODO replace pubkey with index in transaction?
-        let mut balances_history: HashMap<Pubkey, (u64, u64)> = Default::default();
         for (instruction_index, ((program_id, instruction), program_indices)) in message
             .program_instructions_iter()
             .zip(program_indices.iter())
             .enumerate()
         {
-            let is_precompile = is_precompile(program_id, |id| {
-                invoke_context.environment_config.feature_set.is_active(id)
-            });
+            // let is_precompile = is_precompile(program_id, |id| {
+            //     invoke_context.environment_config.feature_set.is_active(id)
+            // });
 
             // Fixup the special instructions key if present
             // before the account pre-values are taken care of
@@ -81,11 +78,9 @@ impl MessageProcessor {
                     .transaction_context
                     .get_account_at_index(instruction_account.index_in_transaction)
                     .expect("instruction account must always exist");
-                let balance = account_data.borrow().lamports();
-                balances_history.insert(instruction_account_key.clone(), (balance, balance));
             }
 
-            let result = if is_precompile {
+            let result = /*if is_precompile {
                 invoke_context
                     .transaction_context
                     .get_next_instruction_context()
@@ -100,34 +95,19 @@ impl MessageProcessor {
                         invoke_context.transaction_context.push()?;
                         invoke_context.transaction_context.pop()
                     })
-            } else {
+            } else*/ {
                 let result = invoke_context.process_instruction(
                     &instruction.data,
                     &instruction_accounts,
                     program_indices,
                 );
+                debug_log_ext!("result {:?}", result);
                 result
             };
-
-            for instruction_account in instruction_accounts.iter() {
-                let instruction_account_key = invoke_context
-                    .transaction_context
-                    .get_key_of_account_at_index(instruction_account.index_in_transaction)
-                    .expect("instruction account key must always exist");
-                let account_data = invoke_context
-                    .transaction_context
-                    .get_account_at_index(instruction_account.index_in_transaction)
-                    .expect("instruction account must always exist");
-                let balance = account_data.borrow().lamports();
-                let balance_history = balances_history
-                    .get_mut(instruction_account_key)
-                    .expect("balance history entry must exist");
-                balance_history.1 = balance;
-            }
 
             result
                 .map_err(|err| TransactionError::InstructionError(instruction_index as u8, err))?;
         }
-        Ok(balances_history)
+        Ok(())
     }
 }

@@ -1,7 +1,7 @@
 #[cfg(test)]
 pub mod tests {
     use crate::{
-        account::{AccountSharedData, ReadableAccount, DUMMY_INHERITABLE_ACCOUNT_FIELDS},
+        account::{AccountSharedData, ReadableAccount},
         common::rbpf_config_default,
         compute_budget::compute_budget::ComputeBudget,
         context::{EnvironmentConfig, InvokeContext, TransactionContext},
@@ -10,14 +10,13 @@ pub mod tests {
         loaded_programs::{ProgramCacheEntry, ProgramCacheForTxBatch, ProgramRuntimeEnvironments},
         message_processor::MessageProcessor,
         native_loader,
-        native_loader::create_loadable_account_for_test,
+        native_loader::{create_loadable_account_with_fields2, INHERITABLE_ACCOUNT_FIELDS},
         solana_program::{
             feature_set::feature_set_default,
             message::{AccountKeys, LegacyMessage, Message, SanitizedMessage},
         },
         system_instruction::{SystemError, SystemInstruction},
-        system_processor,
-        system_program,
+        system_processor, system_program,
         sysvar_cache::SysvarCache,
         test_helpers::journal_state,
     };
@@ -35,7 +34,7 @@ pub mod tests {
     fn test_process_message_readonly_handling_mocked() {
         let config = rbpf_config_default(None);
 
-        let sdk = journal_state();
+        let mut sdk = journal_state();
 
         let writable_pubkey = Pubkey::new_unique();
         let readonly_pubkey = Pubkey::new_unique();
@@ -54,7 +53,7 @@ pub mod tests {
             ),
             (
                 mock_system_program_id,
-                create_loadable_account_for_test("mock_system_program", &native_loader::id()),
+                create_loadable_account_with_fields2("mock_system_program", &native_loader::id()),
             ),
         ];
         let transaction_context = TransactionContext::new(accounts, 1, 3);
@@ -150,7 +149,7 @@ pub mod tests {
             programs_cache_for_tx_batch,
             environment_config,
             compute_budget,
-            &sdk,
+            &mut sdk,
         );
         let result =
             MessageProcessor::process_message(&message, &program_indices, &mut invoke_context);
@@ -232,7 +231,7 @@ pub mod tests {
     #[test]
     fn test_process_message_duplicate_accounts_mocked() {
         let config = rbpf_config_default(None);
-        let sdk = journal_state();
+        let mut sdk = journal_state();
 
         let blockhash = Hash::default();
 
@@ -307,7 +306,7 @@ pub mod tests {
             ),
             (
                 mock_program_id,
-                create_loadable_account_for_test("mock_system_program", &native_loader::id()),
+                create_loadable_account_with_fields2("mock_system_program", &native_loader::id()),
             ),
         ];
         let transaction_context = TransactionContext::new(accounts, 1, 3);
@@ -370,7 +369,7 @@ pub mod tests {
             programs_cache_for_tx_batch,
             environment_config,
             compute_budget,
-            &sdk,
+            &mut sdk,
         );
         let result =
             MessageProcessor::process_message(&message, &program_indices, &mut invoke_context);
@@ -481,7 +480,7 @@ pub mod tests {
 
         let blockhash = Hash::default();
 
-        let sdk = journal_state();
+        let mut sdk = journal_state();
 
         let new_owner = Pubkey::from([9; PUBKEY_BYTES]);
         let from = Pubkey::new_unique();
@@ -499,7 +498,7 @@ pub mod tests {
             (to, to_account),
             (
                 system_program_id,
-                create_loadable_account_for_test("system_program_id", &native_loader_id),
+                create_loadable_account_with_fields2("system_program_id", &native_loader_id),
             ),
         ];
         let transaction_context = TransactionContext::new(accounts, 1, 3);
@@ -544,7 +543,7 @@ pub mod tests {
             programs_cache_for_tx_batch,
             environment_config,
             compute_budget,
-            &sdk,
+            &mut sdk,
         );
 
         let message = SanitizedMessage::Legacy(LegacyMessage::new(
@@ -591,7 +590,7 @@ pub mod tests {
                 .get_account_at_index(2)
                 .unwrap()
                 .borrow();
-            assert_eq!(DUMMY_INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
+            assert_eq!(0, account3.lamports());
         }
     }
 
@@ -601,7 +600,7 @@ pub mod tests {
 
         let blockhash = Hash::default();
 
-        let sdk = journal_state();
+        let mut sdk = journal_state();
 
         let from = Pubkey::new_unique();
         let to = Pubkey::from([3; PUBKEY_BYTES]);
@@ -613,7 +612,7 @@ pub mod tests {
             (to, AccountSharedData::new(1, 0, &system_program_id)),
             (
                 system_program_id,
-                create_loadable_account_for_test("system_program_id", &native_loader_id),
+                create_loadable_account_with_fields2("system_program_id", &native_loader_id),
             ),
         ];
         let transaction_context = TransactionContext::new(accounts, 1, 3);
@@ -657,7 +656,7 @@ pub mod tests {
             programs_cache_for_tx_batch,
             environment_config,
             compute_budget,
-            &sdk,
+            &mut sdk,
         );
 
         let message = SanitizedMessage::Legacy(LegacyMessage::new(
@@ -701,7 +700,7 @@ pub mod tests {
                 .get_account_at_index(2)
                 .unwrap()
                 .borrow();
-            assert_eq!(DUMMY_INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
+            assert_eq!(INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
         }
 
         let message = SanitizedMessage::Legacy(LegacyMessage::new(
@@ -745,7 +744,7 @@ pub mod tests {
                 .get_account_at_index(2)
                 .unwrap()
                 .borrow();
-            assert_eq!(DUMMY_INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
+            assert_eq!(INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
         }
 
         let message = SanitizedMessage::Legacy(LegacyMessage::new(
@@ -793,7 +792,7 @@ pub mod tests {
                 .get_account_at_index(2)
                 .unwrap()
                 .borrow();
-            assert_eq!(DUMMY_INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
+            assert_eq!(INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
         }
     }
 
@@ -803,7 +802,7 @@ pub mod tests {
 
         let blockhash = Hash::default();
 
-        let sdk = journal_state();
+        let mut sdk = journal_state();
 
         let native_loader_id = native_loader::id();
         let system_program_id = system_program::id();
@@ -818,7 +817,7 @@ pub mod tests {
             (to, account_to),
             (
                 system_program_id,
-                create_loadable_account_for_test("system_program_id", &native_loader_id),
+                create_loadable_account_with_fields2("system_program_id", &native_loader_id),
             ),
         ];
         let transaction_context = TransactionContext::new(accounts, 1, 3);
@@ -854,7 +853,7 @@ pub mod tests {
             programs_cache_for_tx_batch,
             environment_config,
             compute_budget,
-            &sdk,
+            &mut sdk,
         );
 
         let number_of_accounts = invoke_context.transaction_context.get_number_of_accounts();
@@ -913,7 +912,7 @@ pub mod tests {
             .unwrap()
             .borrow()
             .clone();
-        assert_eq!(DUMMY_INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
+        assert_eq!(INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
 
         // allocate more account data for 2nd account
 
@@ -958,7 +957,7 @@ pub mod tests {
                 .get_account_at_index(2)
                 .unwrap()
                 .borrow();
-            assert_eq!(DUMMY_INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
+            assert_eq!(INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
         }
 
         // assign ownership of the 2nd account to some new owner
@@ -1002,7 +1001,7 @@ pub mod tests {
                 .get_account_at_index(2)
                 .unwrap()
                 .borrow();
-            assert_eq!(DUMMY_INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
+            assert_eq!(INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
         }
     }
 
@@ -1012,7 +1011,7 @@ pub mod tests {
 
         let blockhash = Hash::default();
 
-        let sdk = journal_state();
+        let mut sdk = journal_state();
 
         let native_loader_id = native_loader::id();
         let system_program_id = system_program::id();
@@ -1028,7 +1027,7 @@ pub mod tests {
             (to, account_to),
             (
                 system_program_id,
-                create_loadable_account_for_test("system_program_id", &native_loader_id),
+                create_loadable_account_with_fields2("system_program_id", &native_loader_id),
             ),
         ];
         let transaction_context = TransactionContext::new(accounts, 1, 3);
@@ -1064,7 +1063,7 @@ pub mod tests {
             programs_cache_for_tx_batch,
             environment_config,
             compute_budget,
-            &sdk,
+            &mut sdk,
         );
 
         let number_of_accounts = invoke_context.transaction_context.get_number_of_accounts();
@@ -1134,7 +1133,7 @@ pub mod tests {
                 .get_account_at_index(2)
                 .unwrap()
                 .borrow();
-            assert_eq!(DUMMY_INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
+            assert_eq!(INHERITABLE_ACCOUNT_FIELDS.0, account3.lamports());
         }
     }
 }

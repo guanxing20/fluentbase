@@ -1,8 +1,7 @@
 use crate::{Bytes, ExitCode, B256};
 use alloc::string::String;
-use fluentbase_codec::Codec;
 
-#[derive(Codec, Clone, Default, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SyscallInvocationParams {
     pub code_hash: B256,
@@ -80,7 +79,7 @@ impl SyscallResult<()> {
     }
 }
 
-impl<T: Default> SyscallResult<T> {
+impl<T> SyscallResult<T> {
     pub fn new<I: Into<ExitCode>>(
         data: T,
         fuel_consumed: u64,
@@ -117,6 +116,9 @@ impl<T: Default> SyscallResult<T> {
         }
         self.data
     }
+}
+
+impl<T: Default> SyscallResult<T> {
     pub fn unwrap_or_default(self) -> T {
         if self.status.is_ok() {
             self.data
@@ -163,8 +165,12 @@ pub const SYSCALL_ID_CODE_HASH: B256 = B256::with_last_byte(0x0e);
 pub const SYSCALL_ID_CODE_COPY: B256 = B256::with_last_byte(0x0f);
 pub const SYSCALL_ID_TRANSIENT_READ: B256 = B256::with_last_byte(0x11);
 pub const SYSCALL_ID_TRANSIENT_WRITE: B256 = B256::with_last_byte(0x12);
+pub const SYSCALL_ID_BLOCK_HASH: B256 = B256::with_last_byte(0x13);
 
 pub const SYSCALL_ID_METADATA_WRITE: B256 = B256::with_last_byte(0x40);
 pub const SYSCALL_ID_METADATA_SIZE: B256 = B256::with_last_byte(0x41);
 pub const SYSCALL_ID_METADATA_CREATE: B256 = B256::with_last_byte(0x42);
 pub const SYSCALL_ID_METADATA_COPY: B256 = B256::with_last_byte(0x43);
+
+pub const SYSCALL_ID_METADATA_STORAGE_READ: B256 = B256::with_last_byte(0x44);
+pub const SYSCALL_ID_METADATA_STORAGE_WRITE: B256 = B256::with_last_byte(0x45);

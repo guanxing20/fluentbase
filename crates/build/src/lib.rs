@@ -7,6 +7,7 @@ mod utils;
 use crate::build::build_internal;
 pub use build::{execute_build, BuildResult};
 use clap::{Parser, ValueEnum};
+pub use generators::*;
 pub use internal::*;
 use std::{
     env,
@@ -14,10 +15,14 @@ use std::{
 };
 
 // Build configuration constants
+pub const DEFAULT_DOCKER_IMAGE: &str = "ghcr.io/fluentlabs-xyz/fluentbase-build";
 pub const DEFAULT_DOCKER_TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
-pub const DEFAULT_STACK_SIZE: u32 = 128 * 1024;
+pub const DOCKER_PLATFORM: &str = "linux/amd64";
+
+pub const DEFAULT_STACK_SIZE: u32 = 128 * 1024; // 128 KB
 pub const BUILD_TARGET: &str = "wasm32-unknown-unknown";
 pub const HELPER_TARGET_SUBDIR: &str = "wasm-compilation";
+pub const DEFAULT_RUST_TOOLCHAIN: &str = "1.88";
 
 /// Build contract at specified path
 ///
@@ -46,6 +51,8 @@ pub enum Artifact {
     Solidity,
     /// Contract verification metadata
     Metadata,
+    /// Foundry metadata,
+    Foundry,
 }
 
 /// Build configuration for Fluent smart contracts
@@ -59,9 +66,12 @@ pub struct BuildArgs {
     #[arg(long)]
     pub docker: bool,
 
+    #[arg(long, default_value = DEFAULT_DOCKER_IMAGE)]
+    pub docker_image: String,
+
     /// Docker image tag to use
     #[arg(long, default_value = DEFAULT_DOCKER_TAG)]
-    pub tag: String,
+    pub docker_tag: String,
 
     /// Root directory to mount in Docker (defaults to current directory)
     #[arg(long)]
@@ -71,6 +81,10 @@ pub struct BuildArgs {
     /// If not specified, will check rust-toolchain.toml, then use base image version
     #[arg(long)]
     pub rust_version: Option<String>,
+
+    /// Explicitly use the rust-toolchain.toml file from the contract's directory.
+    #[arg(long)]
+    pub use_toolchain_file: bool,
 
     /// Cargo features to activate (comma-separated)
     #[arg(long, value_delimiter = ',')]
@@ -110,9 +124,11 @@ impl Default for BuildArgs {
         Self {
             contract_name: None,
             docker: true,
-            tag: DEFAULT_DOCKER_TAG.to_string(),
+            docker_image: DEFAULT_DOCKER_IMAGE.to_string(),
+            docker_tag: DEFAULT_DOCKER_TAG.to_string(),
             mount_dir: None,
             rust_version: None,
+            use_toolchain_file: false, // by default use rust from the image
             features: vec![],
             no_default_features: true,
             locked: true,
@@ -126,48 +142,65 @@ impl Default for BuildArgs {
 }
 
 impl BuildArgs {
-    /// Get Rust version to use, checking multiple sources
     pub fn toolchain_version(&self, contract_dir: &Path) -> Option<String> {
-        // 1. CLI argument takes precedence
-        if let Some(ref version) = self.rust_version {
-            return Self::normalize_toolchain(version);
+        if let Some(version) = &self.rust_version {
+            return Some(version.clone());
         }
-
-        // 2. Check rust-toolchain.toml
-        let toolchain_toml = contract_dir.join("rust-toolchain.toml");
-        if toolchain_toml.exists() {
-            if let Ok(content) = std::fs::read_to_string(&toolchain_toml) {
-                // Simple parsing for channel
-                // Format: [toolchain]\nchannel = "1.85.0"
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.starts_with("channel") && line.contains('=') {
-                        if let Some(version) = line.split('=').nth(1) {
-                            let version = version.trim().trim_matches('"').trim_matches('\'');
-                            if let Some(normalized) = Self::normalize_toolchain(version) {
-                                return Some(normalized);
-                            }
-                        }
-                    }
-                }
-            }
+        if self.use_toolchain_file {
+            return Self::find_toolchain_in_files(contract_dir);
         }
+        Some(DEFAULT_RUST_TOOLCHAIN.to_string())
+    }
+    /// Finds and parses the toolchain version by checking `rust-toolchain.toml`
+    /// and then the legacy `rust-toolchain` file.
+    ///
+    /// This function defines the priority for discovering the toolchain version from files:
+    /// 1. It first looks for `rust-toolchain.toml` and parses the `channel` value.
+    /// 2. If not found, it falls back to reading the legacy `rust-toolchain` file.
+    ///
+    /// Returns `None` if no valid toolchain file is found.
+    pub fn find_toolchain_in_files(contract_dir: &Path) -> Option<String> {
+        Self::parse_toml_toolchain(contract_dir)
+            .or_else(|| Self::parse_legacy_toolchain(contract_dir))
+    }
 
-        // 3. Check legacy rust-toolchain file
-        let toolchain_file = contract_dir.join("rust-toolchain");
-        if toolchain_file.exists() {
-            if let Ok(version) = std::fs::read_to_string(&toolchain_file) {
-                let trimmed = version.trim();
-                if !trimmed.is_empty() {
-                    if let Some(normalized) = Self::normalize_toolchain(trimmed) {
-                        return Some(normalized);
-                    }
-                }
-            }
+    /// Parses the `channel` from a `rust-toolchain.toml` file.
+    fn parse_toml_toolchain(contract_dir: &Path) -> Option<String> {
+        // Read the file content. The `?` operator will return `None` if reading fails.
+        let content = std::fs::read_to_string(contract_dir.join("rust-toolchain.toml")).ok()?;
+
+        // Use `find_map` to iterate through lines and stop at the first successful parse.
+        // This is much cleaner than nested loops and ifs.
+        content.lines().find_map(|line| {
+            // A more direct way to extract the value using `strip_prefix`.
+            // The chain of `?` makes this very robust against malformed lines.
+            let value_part = line
+                .trim()
+                .strip_prefix("channel")?
+                .trim()
+                .strip_prefix('=')?
+                .trim();
+
+            // Remove quotes from the version string.
+            let version = value_part.trim_matches(|c| c == '"' || c == '\'');
+
+            // Normalize and return if valid.
+            Self::normalize_toolchain(version)
+        })
+    }
+
+    /// Reads the toolchain version from a legacy `rust-toolchain` file.
+    fn parse_legacy_toolchain(contract_dir: &Path) -> Option<String> {
+        // Read the file. The `?` handles the "file not found" case.
+        let version = std::fs::read_to_string(contract_dir.join("rust-toolchain")).ok()?;
+        let trimmed = version.trim();
+
+        // Ensure the file is not empty before normalizing.
+        if trimmed.is_empty() {
+            None
+        } else {
+            Self::normalize_toolchain(trimmed)
         }
-
-        // 4. None - will use base image version
-        None
     }
 
     /// Normalize toolchain by removing architecture suffix
@@ -197,17 +230,15 @@ impl BuildArgs {
 
         // Don't allow generic channels
         if matches!(normalized.as_str(), "stable" | "nightly" | "beta") {
-            eprintln!("Error: Generic channel '{}' not allowed. Use specific version like '1.85.0' or 'nightly-2024-12-01'", normalized);
+            eprintln!("Error: Generic channel '{normalized}' not allowed. Use specific version like '1.85.0' or 'nightly-2024-12-01'");
             return None;
         }
 
         // Basic validation for nightly format
-        if normalized.starts_with("nightly-") {
-            let date_part = &normalized[8..];
+        if let Some(date_part) = normalized.strip_prefix("nightly-") {
             if date_part.len() != 10 || date_part.matches('-').count() != 2 {
                 eprintln!(
-                    "Error: Invalid nightly format. Expected 'nightly-YYYY-MM-DD', got '{}'",
-                    normalized
+                    "Error: Invalid nightly format. Expected 'nightly-YYYY-MM-DD', got '{normalized}'"
                 );
                 return None;
             }
@@ -226,11 +257,11 @@ impl BuildArgs {
             "--release".to_string(),
         ];
 
-        if self.docker {
-            let target_subdir = "docker";
-            cmd.push("--target-dir".to_string());
-            cmd.push(format!("target/{}/{}", HELPER_TARGET_SUBDIR, target_subdir));
-        }
+        // if self.docker {
+        //     let target_subdir = "docker";
+        //     cmd.push("--target-dir".to_string());
+        //     cmd.push(format!("target/{}/{}", HELPER_TARGET_SUBDIR, target_subdir));
+        // }
 
         if self.no_default_features {
             cmd.push("--no-default-features".to_string());
@@ -249,8 +280,8 @@ impl BuildArgs {
         cmd
     }
 
-    /// Generate RUSTFLAGS for WASM compilation
-    pub fn rustflags(&self) -> String {
+    /// Generate RUST FLAGS for WASM compilation
+    pub fn rust_flags(&self) -> String {
         let mut flags = vec![
             format!("-Clink-arg=-zstack-size={}", self.stack_size),
             "-Cpanic=abort".to_string(),

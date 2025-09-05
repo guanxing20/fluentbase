@@ -1,40 +1,24 @@
 use crate::{HostTestingContext, HostTestingContextNativeAPI};
 use core::{borrow::Borrow, mem::take, str::from_utf8};
+use fluentbase_revm::{RwasmBuilder, RwasmContext, RwasmHaltReason};
 use fluentbase_runtime::{Runtime, RuntimeContext};
 use fluentbase_sdk::{
-    bytes::BytesMut,
-    calc_create_address,
-    compile_wasm_to_rwasm,
-    Address,
-    BytecodeOrHash,
-    Bytes,
-    ContextReader,
-    ExitCode,
-    GenesisContract,
-    MetadataAPI,
-    SharedAPI,
-    SharedContextInputV1,
-    STATE_MAIN,
-    U256,
+    bytes::BytesMut, calc_create_address, compile_wasm_to_rwasm, debug_log_ext, Address,
+    BytecodeOrHash, Bytes, ContextReader, ExitCode, GenesisContract, MetadataAPI, SharedAPI,
+    SharedContextInputV1, STATE_MAIN, U256,
 };
 use revm::{
     context::{
         result::{ExecutionResult, ExecutionResult::Success, Output},
-        BlockEnv,
-        CfgEnv,
-        TransactTo,
-        TxEnv,
+        BlockEnv, CfgEnv, TransactTo, TxEnv,
     },
     database::InMemoryDB,
     handler::MainnetContext,
     primitives::{hardfork::PRAGUE, keccak256, map::DefaultHashBuilder, HashMap},
     state::{Account, AccountInfo, Bytecode},
-    DatabaseCommit,
-    ExecuteCommitEvm,
-    MainBuilder,
+    DatabaseCommit, ExecuteCommitEvm, MainBuilder,
 };
 use rwasm::{RwasmModule, Store};
-use rwasm_revm::{RwasmBuilder, RwasmContext};
 
 #[allow(dead_code)]
 pub struct EvmTestingContext {
@@ -61,6 +45,16 @@ impl EvmTestingContext {
         }
     }
 
+    pub fn with_block_number(self, number: u64) -> Self {
+        let sdk = self.sdk.with_block_number(number);
+        Self {
+            sdk,
+            db: self.db,
+            cfg: self.cfg,
+            disabled_rwasm: self.disabled_rwasm,
+        }
+    }
+
     // Add smart contracts to the genesis
     pub fn with_contracts(self, contracts: &[GenesisContract]) -> Self {
         let mut db = self.db;
@@ -81,7 +75,7 @@ impl EvmTestingContext {
         }
     }
 
-    pub fn commit_storage(&mut self) {
+    pub fn commit_sdk_to_db(&mut self) {
         let storage = self.sdk.dump_storage();
         storage.iter().for_each(|((address, slot), value)| {
             self.db
@@ -90,10 +84,22 @@ impl EvmTestingContext {
         })
     }
 
-    pub fn db_storage_to_sdk(&mut self) {
+    pub fn commit_db_to_sdk(&mut self) {
         for (address, db_account) in &mut self.db.cache.accounts {
             self.sdk.visit_inner_storage_mut(|storage| {
                 for (k, v) in &db_account.storage {
+                    debug_log_ext!("db storage -> sdk storage ({}, {})={}", address, k, v);
+                    storage.insert((*address, *k), *v);
+                }
+            });
+            self.sdk.visit_inner_metadata_storage_mut(|storage| {
+                for (k, v) in &db_account.storage {
+                    debug_log_ext!(
+                        "db storage -> sdk metadata storage ({}, {})={}",
+                        address,
+                        k,
+                        v
+                    );
                     storage.insert((*address, *k), *v);
                 }
             });
@@ -211,7 +217,7 @@ impl EvmTestingContext {
         input: Bytes,
         gas_limit: Option<u64>,
         value: Option<U256>,
-    ) -> ExecutionResult {
+    ) -> ExecutionResult<RwasmHaltReason> {
         let mut tx_builder = TxBuilder::call(self, caller, callee, value).input(input);
         if let Some(gas_limit) = gas_limit {
             tx_builder = tx_builder.gas_limit(gas_limit);
@@ -226,7 +232,7 @@ impl EvmTestingContext {
         input: Bytes,
         gas_limit: Option<u64>,
         value: Option<U256>,
-    ) -> ExecutionResult {
+    ) -> ExecutionResult<RwasmHaltReason> {
         self.add_balance(caller, U256::from(1e18));
         self.call_evm_tx_simple(caller, callee, input, gas_limit, value)
     }
@@ -276,7 +282,7 @@ impl<'a> TxBuilder<'a> {
     fn block_env(ctx: &EvmTestingContext) -> BlockEnv {
         let mut block_env = BlockEnv::default();
         let ctx = ctx.sdk.borrow().context();
-        block_env.number = ctx.block_number();
+        block_env.number = U256::from(ctx.block_number());
         block_env
     }
 
@@ -306,11 +312,11 @@ impl<'a> TxBuilder<'a> {
     }
 
     pub fn timestamp(mut self, timestamp: u64) -> Self {
-        self.block.timestamp = timestamp;
+        self.block.timestamp = U256::from(timestamp);
         self
     }
 
-    pub fn exec(&mut self) -> ExecutionResult {
+    pub fn exec(&mut self) -> ExecutionResult<RwasmHaltReason> {
         self.tx.nonce = self.ctx.nonce(self.tx.caller);
         let db = take(&mut self.ctx.db);
         if self.ctx.disabled_rwasm {
@@ -332,7 +338,7 @@ impl<'a> TxBuilder<'a> {
             let result = evm.transact_commit(self.tx.clone()).unwrap();
             let new_db = &mut evm.0.journaled_state.database;
             self.ctx.db = take(new_db);
-            result
+            result.map_haltreason(RwasmHaltReason::from)
         }
     }
 }

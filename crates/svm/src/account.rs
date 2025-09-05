@@ -4,8 +4,7 @@ use crate::{
     helpers::is_zeroed,
     solana_program::{loader_v4, sysvar::Sysvar},
     system_instruction::{
-        MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION,
-        MAX_PERMITTED_DATA_LENGTH,
+        MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION, MAX_PERMITTED_DATA_LENGTH,
     },
 };
 use alloc::{rc::Rc, sync::Arc, vec, vec::Vec};
@@ -52,7 +51,7 @@ fn shared_serialize_data<T: serde::Serialize, U: WritableAccount>(
 
 /// An Account with data that is stored on chain
 #[repr(C)]
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Default /*, AbiExample*/)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Default, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     /// lamports in the account
@@ -139,6 +138,19 @@ impl WritableAccount for Account {
             executable,
             rent_epoch,
         }
+    }
+}
+
+impl solana_account_info::Account for Account {
+    fn get(&mut self) -> (&mut u64, &mut [u8], &Pubkey, bool, u64) {
+        let lamports = self.lamports;
+        (
+            &mut self.lamports,
+            &mut self.data,
+            &self.owner,
+            self.executable,
+            lamports,
+        )
     }
 }
 
@@ -292,6 +304,7 @@ impl Debug for AccountSharedData {
             .field("owner", &self.owner)
             .field("executable", &self.executable)
             .field("rent_epoch", &self.rent_epoch)
+            .field("data.len", &self.data.len())
             .finish()
     }
 }
