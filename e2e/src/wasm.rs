@@ -1,20 +1,12 @@
 use crate::{
-    EvmTestingContextWithGenesis,
-    EXAMPLE_CHECKMATE,
-    EXAMPLE_ERC20,
-    EXAMPLE_GREETING,
-    EXAMPLE_JSON,
-    EXAMPLE_KECCAK256,
-    EXAMPLE_PANIC,
-    EXAMPLE_RWASM,
-    EXAMPLE_SECP256K1,
-    EXAMPLE_SIMPLE_STORAGE,
+    EvmTestingContextWithGenesis, EXAMPLE_CHECKMATE, EXAMPLE_ERC20, EXAMPLE_GREETING, EXAMPLE_JSON,
+    EXAMPLE_KECCAK256, EXAMPLE_PANIC, EXAMPLE_RWASM, EXAMPLE_SECP256K1, EXAMPLE_SIMPLE_STORAGE,
     EXAMPLE_TINY_KECCAK256,
 };
 use core::str::from_utf8;
 use fluentbase_codec::{bytes::BytesMut, SolidityABI};
-use fluentbase_sdk::{bytes, Address, Bytes, U256};
-use fluentbase_sdk_testing::EvmTestingContext;
+use fluentbase_sdk::{bytes, constructor::encode_constructor_params, Address, Bytes, U256};
+use fluentbase_testing::EvmTestingContext;
 use hex_literal::hex;
 use revm::bytecode::Bytecode;
 use rwasm::RwasmModule;
@@ -147,7 +139,22 @@ fn test_wasm_panic() {
 fn test_wasm_erc20() {
     let mut ctx = EvmTestingContext::default().with_minimal_genesis();
     const OWNER_ADDRESS: Address = Address::ZERO;
-    let contract_address = ctx.deploy_evm_tx(OWNER_ADDRESS, EXAMPLE_ERC20.into());
+
+    // Add constructor parameters
+    let bytecode: &[u8] = EXAMPLE_ERC20.into();
+    // constructor params for ERC20:
+    //     name: "TestToken"
+    //     symbol: "TST"
+    //     initial_supply: 1_000_000
+    // use examples/erc20/src/lib.rs print_constructor_params_hex() to regenerate
+    let constructor_params = hex!("000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000000000000000000000000000000000000000000954657374546f6b656e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000035453540000000000000000000000000000000000000000000000000000000000");
+    let encoded_constructor_params = encode_constructor_params(&constructor_params);
+    let mut input: Vec<u8> = Vec::new();
+    input.extend(bytecode);
+    input.extend(encoded_constructor_params);
+
+    let contract_address = ctx.deploy_evm_tx(OWNER_ADDRESS, input.into());
+
     // call with empty input (should fail)
     let result = ctx.call_evm_tx(
         OWNER_ADDRESS,
@@ -277,3 +284,19 @@ fn deploy_and_load_wasm_contract() {
         }
     }
 }
+
+// #[test]
+// fn test_reduce_binary() {
+//     use rwasm::{instruction_set, RwasmModule};
+//     use std::fs;
+//     let raw_input = include_str!("./input.hex");
+//     let input = hex::decode(raw_input).unwrap();
+//     let (mut module, _) = RwasmModule::new(&input);
+//     module.code_section = instruction_set! {
+//         Unreachable
+//     };
+//     module.data_section = vec![];
+//     module.elem_section = vec![];
+//     let module = module.serialize();
+//     fs::write("./input-fixed.hex", hex::encode(&module)).unwrap();
+// }
